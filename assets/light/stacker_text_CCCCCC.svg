@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="4096mm"
+   height="1024mm"
+   viewBox="0 0 4096 1024"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4 (86a8ad7, 2024-10-11)"
+   sodipodi:docname="stacker_text_CCCCCC.svg"
+   inkscape:export-filename="stacker_text_white.png"
+   inkscape:export-xdpi="25.4"
+   inkscape:export-ydpi="25.4"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#505050"
+     bordercolor="#eeeeee"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="true"
+     inkscape:deskcolor="#505050"
+     inkscape:document-units="px"
+     showborder="true"
+     inkscape:zoom="0.070602926"
+     inkscape:cx="4603.2087"
+     inkscape:cy="1253.4891"
+     inkscape:window-width="2560"
+     inkscape:window-height="1336"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <path
+       id="text3"
+       style="font-size:240px;font-family:'Franklin Gothic Medium';-inkscape-font-specification:'Franklin Gothic Medium, ';text-align:start;letter-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:start;white-space:pre;shape-inside:url(#rect4);display:inline;fill:#cccccc;fill-opacity:1;stroke-width:1.74292;stroke-linecap:round;paint-order:stroke markers fill"
+       d="M 641.67296,110.43098 V 332.96623 H 165.64518 C 68.599462,332.96623 0,430.85182 0,517.8583 c 0,81.15028 47.68723,130.50647 105.41268,157.27773 55.21565,25.098 118.79521,25.9333 137.20041,25.9333 h 4.18683 c 49.35947,1.67318 79.47212,3.35025 78.6355,25.10183 -0.83658,0.83662 0.002,8.36445 -4.1801,12.54755 -2.5098,2.5094 -7.53286,5.01778 -17.57206,5.01778 H 18.402494 V 913.56902 H 328.78509 c 95.37244,0 165.64518,-92.02466 165.64518,-179.86809 0,-58.56194 -20.91166,-102.90324 -52.70272,-133.85746 -63.58148,-62.74506 -161.4636,-68.59994 -194.92763,-68.59994 -3.34638,0 -5.02556,0.83767 -5.86218,0.83767 h -8.36021 c -58.56202,-0.83656 -63.58268,-6.69518 -63.58268,-16.73438 0,-6.6928 5.85743,-12.54755 15.06006,-12.54755 l 457.61805,-5.2e-4 v 220.02274 c 0,102.06549 82.82739,184.89259 184.89259,184.89259 H 1023.9984 V 737.88104 H 826.56555 c -8.3662,0 -15.06007,-6.69383 -15.06007,-15.05955 V 502.79875 c 224.06922,-1.20101 448.13772,-0.47225 672.20752,0 7.529,0.0445 12.8357,6.82159 14.2219,14.22239 l 1.2531,6.69261 h -214.1678 c -85.3333,0 -157.2849,57.72228 -178.1999,136.36274 -4.1831,18.4052 -5.0184,44.34532 -5.855,68.60666 0,102.06549 82.8263,184.88587 184.0549,184.88587 h 85.3349 298.6649 V 517.8583 c 0,-102.06528 -82.8259,-184.89207 -184.0544,-184.89207 H 811.50548 V 110.43098 Z m 1732.60374,0 v 222.53525 h -434.1978 c -102.0652,0 -184.892,82.82679 -184.892,184.89207 v 210.82485 c 0,102.06549 82.8268,184.88587 184.892,184.88587 H 2544.102 V 685.17831 l 224.2101,222.53525 h 241.7754 L 2717.277,617.40881 c 97.0461,-97.04566 194.9283,-193.25231 292.8105,-290.29804 H 2768.3121 L 2544.102,549.64602 V 110.43098 Z m 806.4805,222.53525 c -27.608,0 -54.3802,5.85856 -77.8046,16.73438 -69.438,30.11763 -107.087,96.21003 -107.087,168.15769 v 210.82485 c 0,102.06549 82.8264,184.88587 184.8916,184.88587 h 649.2027 V 517.8583 c 0,-8.366 6.6928,-15.05955 14.2224,-15.05955 H 4096 V 332.96623 h -251.8172 c -96.2088,0 -175.6876,74.45789 -183.2172,168.15717 h -0.8382 v 259.34799 h -479.3702 c -8.3656,0 -15.0596,-6.69386 -15.0596,-15.06006 v -40.99285 l 410.7703,-0.83664 V 517.85933 c 0,-102.0653 -82.8201,-184.89258 -184.8853,-184.89258 z M 1940.0789,502.79875 h 434.1978 v 240.93774 h -434.1978 c -8.3657,0 -15.06,-6.68716 -15.06,-15.05334 V 517.8583 c 0,-8.366 6.6943,-15.05955 15.06,-15.05955 z m 1251.5515,0 h 199.9522 c 8.3658,0 15.0528,6.69355 15.0528,15.05955 v 35.13739 h -240.9378 v -35.13739 -0.83768 c 0,-6.6928 5.8544,-14.22187 25.9328,-14.22187 z m -1906.6096,184.0544 h 214.1683 v 65.25079 l -214.1683,-0.83664 c -8.3662,0 -14.2224,-6.69331 -14.2224,-14.2229 v -35.13739 c 0,-8.366 6.6929,-15.05335 14.2224,-15.05335 z"
+       sodipodi:nodetypes="ccsscscccsccsscsscsccssccssccccsccsccsscccccssssccccccccccscssscssccscccssccssssccssssssscccssccccsscc" />
+  </g>
+</svg>
