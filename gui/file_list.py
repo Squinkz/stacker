@@ -109,6 +109,23 @@ class InputFileListModel(QtCore.QAbstractListModel):
             bottomRight = self.index(len(self.rows) - 1, 0)
             self.dataChanged.emit(topLeft, bottomRight, [CURRENT_PREVIEW_ROLE])
 
+    def SetTransferWarnings(self, warningEntryIds, entryIds = None):
+        warningEntryIds = set(warningEntryIds or set())
+        targetEntryIds = set(entryIds or [])
+        changedRows = []
+        for row, data in enumerate(self.rows):
+            entryId = data.get("entryId")
+            if targetEntryIds and entryId not in targetEntryIds:
+                continue
+            isWarning = entryId in warningEntryIds
+            if data.get("isTransferWarning", False) != isWarning:
+                data["isTransferWarning"] = isWarning
+                changedRows.append(row)
+
+        for row in changedRows:
+            index = self.index(row, 0)
+            self.dataChanged.emit(index, index, [TRANSFER_WARNING_ROLE])
+
 class InputFileListView(QtWidgets.QListView):
     reorderRequested = QtCore.Signal(list, int)
 
@@ -193,17 +210,22 @@ class InputFileListView(QtWidgets.QListView):
         index = self.model().index(row, 0) if self.model() is not None else QtCore.QModelIndex()
         textRect = self.TextRect(row)
         metrics = QtGui.QFontMetrics(self.font())
+        frameNumber = (index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").partition("\t")[0]
+        digitWidth = max(4, len(frameNumber))
         return QtCore.QRect(
             textRect.left(),
             textRect.top(),
-            metrics.horizontalAdvance("0000"),
+            metrics.horizontalAdvance("0" * digitWidth),
             textRect.height(),
         )
 
     def FilenameRect(self, row):
+        index = self.model().index(row, 0) if self.model() is not None else QtCore.QModelIndex()
         textRect = self.TextRect(row)
         metrics = QtGui.QFontMetrics(self.font())
-        return textRect.adjusted(metrics.horizontalAdvance("0000") + 22, 0, 0, 0)
+        frameNumber = (index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").partition("\t")[0]
+        digitWidth = max(4, len(frameNumber))
+        return textRect.adjusted(metrics.horizontalAdvance("0" * digitWidth) + 22, 0, 0, 0)
 
     def viewportEvent(self, event):
         if event.type() == QtCore.QEvent.Type.ToolTip:
@@ -513,7 +535,7 @@ class InputFileListDelegate(QtWidgets.QStyledItemDelegate):
         frameNumber, separator, filename = text.partition("\t")
         metrics = QtGui.QFontMetrics(font)
         if separator:
-            numberWidth = metrics.horizontalAdvance("0000")
+            numberWidth = metrics.horizontalAdvance("0" * max(4, len(frameNumber)))
             numberRect = QtCore.QRect(textRect.left(), textRect.top(), numberWidth, textRect.height())
             filenameRect = textRect.adjusted(numberWidth + 22, 0, 0, 0)
             painter.drawText(numberRect, QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter, frameNumber)

@@ -1,5 +1,4 @@
 import os
-import json
 import re
 import html
 import threading
@@ -9,16 +8,16 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .config import BLEND_MODES, INPUT_TYPES, OUTPUT_TYPES
 from .metadata import (
-    ColorSpaceLine, DimensionsLine, IsUnknownColorSpace, IsUnknownTransferFunction,
-    ReadImageDimensions, ReadImageMetadata, TransferFunctionLine, TransferOverrideLine,
+    DimensionsLine, IsUnknownTransferFunction, ReadImageDimensions, ReadImageMetadata,
+    TransferFunctionLine, TransferOverrideLine,
 )
 from .resources import (
-    AppRoot, AssetIcon, BuildStyle, DarkAssetIcon, SplitAssetIcon,
+    AppRoot, AssetIcon, BuildStyle, SplitAssetIcon,
     StatusAssetIcon, ThemeAboutLogoPath, ThemeAppIconPath, ThemeAssetPath, ThemeBaseName, ThemeColor,
     ThemeDisplayNames, ThemeName, ThemeQColor,
 )
 from .widgets import (
-    ButtonComboField, CheckboxField, ConfigureFormLayout, FolderField,
+    ButtonComboField, CheckboxField, ClickDismissFilter, ConfigureFormLayout, ContextSubmenuController, FolderField,
     DownwardComboBox, FloatSlider, IconButtonText, OverrideField,
     OutputNameTypeField, RangeField, ResolutionField, RightAlignedMenuToolButton, SectionHeading,
     SliderSpinBoxField, ViewportOverlay, PreviewPane, FrameScrubber,
@@ -26,180 +25,25 @@ from .widgets import (
 from .presets import PresetMixin
 from .project import ProjectMixin
 from .worker import RenderWorker
-from render.renderer import CanonicalFileType, FileTypeExtensions, ResizeFilterNames
+from render.renderer import CanonicalFileType, FileTypeExtensions, ResizeFilterNames, TransferFunctionNames
 
 APP_NAME = "Stacker"
 APP_VERSION = "0.1.0"
 APP_RELEASE_DATE = "Unreleased"
-APP_COPYRIGHT = "Copyright (c) 2026 Dieter Stassen"
+APP_COPYRIGHT = "2026 Dieter Stassen"
+APP_DESCRIPTION = (
+    "Stacker blends image sequences into trails, motion effects, and experimental composites; "
+    "from classic star trails to motion extraction and fixed-length stack blends."
+)
 APP_GITHUB_URL = "https://github.com/Squinkz"
 FILE_INFO_DIALOG_WIDTH = 640
 FILE_INFO_VALUE_WIDTH = 430
 
+
 from .file_list import (
-    ACTIVE_ROLE, DISPLAY_INDEX_ROLE, ENTRY_ID_ROLE, FILENAME_ROLE, MANUALLY_ENABLED_ROLE,
-    MISSING_ROLE, PENDING_REMOVE_ROLE, REORDER_VISIBLE_ROLE, RESCALE_WARNING_ROLE,
-    TRANSFER_WARNING_ROLE,
+    ACTIVE_ROLE, ENTRY_ID_ROLE, FILENAME_ROLE,
     InputFileListDelegate, InputFileListModel, InputFileListView,
 )
-
-
-class ContextSubmenuController(QtCore.QObject):
-    def __init__(self, owner, rootMenu, parentButton, populateCallback):
-        super().__init__(parentButton)
-        self.owner = owner
-        self.rootMenu = rootMenu
-        self.parentButton = parentButton
-        self.populateCallback = populateCallback
-        self.childMenu = None
-        self.leaveParentTimer = QtCore.QTimer(self)
-        self.leaveParentTimer.setSingleShot(True)
-        self.leaveParentTimer.setInterval(80)
-        self.leaveParentTimer.timeout.connect(self.HideIfPointerLeftMenus)
-        self.leaveChildTimer = QtCore.QTimer(self)
-        self.leaveChildTimer.setSingleShot(True)
-        self.leaveChildTimer.setInterval(500)
-        self.leaveChildTimer.timeout.connect(self.HideIfPointerLeftChild)
-        self.pointerWatchTimer = QtCore.QTimer(self)
-        self.pointerWatchTimer.setInterval(25)
-        self.pointerWatchTimer.timeout.connect(self.HideIfPointerLeftMenus)
-        self.parentButton.installEventFilter(self)
-        self.rootMenu.installEventFilter(self)
-        self.rootMenu.aboutToHide.connect(self.HideChildMenu)
-
-    def eventFilter(self, watched, event):
-        if watched is QtWidgets.QApplication.instance():
-            if event.type() == QtCore.QEvent.Type.MouseMove:
-                if (
-                    self.childMenu is not None
-                    and not self.PointerInWidget(self.parentButton)
-                    and not self.PointerInWidget(self.childMenu)
-                ):
-                    self.HideChildMenu()
-                return False
-            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
-                if self.childMenu is not None:
-                    inParent = self.PointerInWidget(self.parentButton)
-                    inChild = self.PointerInWidget(self.childMenu)
-                    inRoot = self.PointerInWidget(self.rootMenu)
-                    if not inChild:
-                        self.HideChildMenu()
-                        if not inParent and not inRoot:
-                            self.rootMenu.hide()
-                return False
-
-        if watched is self.rootMenu:
-            if event.type() == QtCore.QEvent.Type.MouseButtonPress and self.childMenu is not None:
-                self.HideChildMenu()
-                return False
-
-        if watched is self.parentButton:
-            if event.type() == QtCore.QEvent.Type.Enter:
-                self.SetParentForcedIdle(False)
-                self.ShowChildMenu()
-                return False
-            if event.type() == QtCore.QEvent.Type.Leave:
-                if not self.PointerInWidget(self.childMenu):
-                    self.HideChildMenu()
-                return False
-            if event.type() in (QtCore.QEvent.Type.MouseButtonPress, QtCore.QEvent.Type.MouseButtonRelease):
-                return True
-        elif watched is self.childMenu:
-            if event.type() == QtCore.QEvent.Type.Enter:
-                self.pointerWatchTimer.stop()
-                self.leaveChildTimer.stop()
-                self.parentButton.setChecked(True)
-                return False
-            if event.type() == QtCore.QEvent.Type.Leave:
-                self.leaveChildTimer.start()
-                return False
-        return super().eventFilter(watched, event)
-
-    def ShowChildMenu(self):
-        self.leaveParentTimer.stop()
-        self.leaveChildTimer.stop()
-        if self.childMenu is None:
-            self.childMenu = QtWidgets.QMenu(self.rootMenu)
-            self.childMenu.setObjectName("viewportContextMenu")
-            self.childMenu.installEventFilter(self)
-            self.childMenu.aboutToHide.connect(self.ChildMenuAboutToHide)
-            self.populateCallback(self.childMenu)
-            QtWidgets.QApplication.instance().installEventFilter(self)
-            self.pointerWatchTimer.start()
-        self.parentButton.setChecked(True)
-        self.SetParentForcedIdle(False)
-        self.childMenu.popup(self.ChildMenuPosition())
-
-    def ChildMenuPosition(self):
-        if self.childMenu is None:
-            return QtCore.QPoint()
-
-        parentTopLeft = self.parentButton.mapToGlobal(QtCore.QPoint(0, 0))
-        parentRect = QtCore.QRect(parentTopLeft, self.parentButton.size())
-        size = self.childMenu.sizeHint()
-        screen = QtGui.QGuiApplication.screenAt(parentRect.center()) or QtGui.QGuiApplication.primaryScreen()
-        available = screen.availableGeometry() if screen else QtWidgets.QApplication.primaryScreen().availableGeometry()
-        x = parentRect.right() + 1
-        if x + size.width() > available.right():
-            x = parentRect.left() - size.width()
-        x = max(available.left(), x)
-
-        y = parentRect.top()
-        if y + size.height() > available.bottom():
-            y = available.bottom() - size.height()
-        y = max(available.top(), y)
-        return QtCore.QPoint(x, y)
-
-    def PointerInWidget(self, widget):
-        if widget is None or not widget.isVisible():
-            return False
-        position = QtGui.QCursor.pos()
-        return widget.rect().contains(widget.mapFromGlobal(position))
-
-    def HideIfPointerLeftMenus(self):
-        if self.PointerInWidget(self.parentButton):
-            return
-        if self.PointerInWidget(self.childMenu):
-            self.pointerWatchTimer.stop()
-            return
-        self.HideChildMenu()
-
-    def HideIfPointerLeftChild(self):
-        if self.PointerInWidget(self.childMenu) or self.PointerInWidget(self.parentButton):
-            return
-        self.HideChildMenu()
-
-    def HideChildMenu(self):
-        self.leaveParentTimer.stop()
-        self.leaveChildTimer.stop()
-        self.pointerWatchTimer.stop()
-        if self.childMenu is not None:
-            self.childMenu.hide()
-            self.childMenu.deleteLater()
-            self.childMenu = None
-        QtWidgets.QApplication.instance().removeEventFilter(self)
-        self.parentButton.setChecked(False)
-        self.parentButton.setDown(False)
-        self.parentButton.clearFocus()
-        if not self.PointerInWidget(self.parentButton):
-            self.SetParentForcedIdle(True)
-        self.parentButton.style().unpolish(self.parentButton)
-        self.parentButton.style().polish(self.parentButton)
-        self.parentButton.update()
-        self.rootMenu.update()
-
-    def SetParentForcedIdle(self, enabled):
-        self.parentButton.setProperty("forceIdle", bool(enabled))
-        self.parentButton.style().unpolish(self.parentButton)
-        self.parentButton.style().polish(self.parentButton)
-        self.parentButton.update()
-
-    def ChildMenuAboutToHide(self):
-        if QtWidgets.QApplication.mouseButtons() == QtCore.Qt.MouseButton.NoButton:
-            return
-        if self.PointerInWidget(self.parentButton) or self.PointerInWidget(self.rootMenu):
-            return
-        QtCore.QTimer.singleShot(0, self.rootMenu.hide)
 
 
 class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
@@ -240,6 +84,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.cleanProjectSnapshot = None
         self.lastProjectPresetIdentity = None
         self.exportMode = "sequence"
+        self.stackMemoryExceeded = False
         self.inputFileEntries = []
         self.nextInputEntryId = 1
         self.inputPreviewFilenames = []
@@ -249,6 +94,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.rescaleWarningInputFilenames = set()
         self.transferWarningInputFilenames = set()
         self.inputDimensionCache = {}
+        self.inputMetadataCache = {}
         self.inputHasMixedDimensions = False
         self.previewRangeStopWhileDragging = False
         self.scrubberTrimDragStartRange = None
@@ -343,6 +189,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.redoShortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self.redoShortcut.activated.connect(self.RedoProjectAction)
 
+        self.startPreviewShortcut = QtGui.QShortcut(QtGui.QKeySequence("F4"), self)
+        self.startPreviewShortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.startPreviewShortcut.activated.connect(self.StartPreview)
+
+        self.startExportShortcut = QtGui.QShortcut(QtGui.QKeySequence("F5"), self)
+        self.startExportShortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.startExportShortcut.activated.connect(self.StartExport)
+
         self.liveExportPreviewShortcut = QtGui.QShortcut(QtGui.QKeySequence("F9"), self)
         self.liveExportPreviewShortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self.liveExportPreviewShortcut.activated.connect(self.ToggleLiveExportPreview)
@@ -355,7 +209,18 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.showConsoleShortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self.showConsoleShortcut.activated.connect(self.ShowRenderLog)
 
+        self.viewSelectedInputFileShortcut = QtGui.QShortcut(QtGui.QKeySequence("V"), self)
+        self.viewSelectedInputFileShortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.viewSelectedInputFileShortcut.activated.connect(self.ViewSelectedInputFileFromShortcut)
+
     def eventFilter(self, watched, event):
+        sidebarScrollPages = getattr(self, "sidebarScrollPages", {})
+        if watched in sidebarScrollPages and event.type() in (QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Show):
+            self.SyncSidebarScrollPageWidth(watched)
+
+        if event.type() == QtCore.QEvent.Type.KeyPress and self.HandleTabShortcut(event):
+            return True
+
         if watched in getattr(self, "spinBoxUndoWidgets", set()) and event.type() == QtCore.QEvent.Type.MouseButtonPress:
             self.spinBoxMouseUndoActive = True
             self.BeginUndoTransaction()
@@ -417,6 +282,11 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event):
+        if self.runActive and event.key() == QtCore.Qt.Key.Key_Escape:
+            self.CancelRender()
+            event.accept()
+            return
+
         if self.viewportOnlyMode and event.key() in (
             QtCore.Qt.Key.Key_Escape,
             QtCore.Qt.Key.Key_Return,
@@ -459,9 +329,11 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.inputDirectory,
             self.addInputFileButton,
             self.sortInputFilesButton,
+            self.sortInputFilesNumericButton,
             self.syncInputSelectionButton,
             self.markInputInButton,
             self.markInputOutButton,
+            self.clearInputRangeButton,
             self.moveInputFileUpButton,
             self.moveInputFileDownButton,
             self.removeInputFileButton,
@@ -474,12 +346,17 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.renderPathMode0,
             self.renderPathMode1,
             self.renderPathMode2,
+            self.pairBlurSlider,
+            self.pairBlurSpinBox,
+            self.pairBlurKernel,
             self.stackSizeSlider,
             self.stackSizeSpinBox,
+            self.stackDirection,
             self.blendScaleSlider,
             self.blendScaleSpinBox,
             self.blendOffsetSlider,
             self.blendOffsetSpinBox,
+            self.absoluteValues,
             self.blendMode,
             self.decay,
             self.opacity,
@@ -581,6 +458,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.skipOutput.setRange(1, 999999)
         self.skipOutput.setValue(1)
         self.skipOutput.setSuffix(" frame(s)")
+        self.skipOutput.valueChanged.connect(self.UpdateOutputSequenceSuffixLabel)
 
         overridesForm = QtWidgets.QFormLayout()
         ConfigureFormLayout(overridesForm)
@@ -640,7 +518,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.middleGrayResetButton.clicked.connect(self.ResetMiddleGray)
         self.themeSelector = DownwardComboBox()
         self.themeSelector.addItems(ThemeDisplayNames())
-        self.themeSelector.setCurrentText("Dark Fire")
+        self.themeSelector.setCurrentText("Dark Ice")
         self.themeSelector.currentTextChanged.connect(self.SetTheme)
         self.viewportBackgroundSlider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.viewportBackgroundSlider.setRange(0, 255)
@@ -671,6 +549,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.overrideHeight.valueChanged.connect(self.RefreshExportResolutionWarnings)
         self.blendInLinear.toggled.connect(self.UpdateTransferOverrideControls)
         self.blendInLinear.toggled.connect(self.UpdateEffectiveOverrideValues)
+        self.blendInLinear.toggled.connect(self.RefreshInputTransferWarnings)
+        self.blendInLinear.toggled.connect(self.RefreshInputFileList)
         self.blendInLinear.toggled.connect(self.RefreshInputPreviewMetadata)
         self.useCustomMiddleGray.toggled.connect(self.CustomMiddleGrayToggled)
         self.middleGray.valueChanged.connect(self.UpdateMiddleGrayControls)
@@ -712,13 +592,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         buttonLayout.addStretch(1)
         buttonLayout.addWidget(closeButton)
 
-        layout.addWidget(SectionHeading("Viewport"))
+        layout.addWidget(SectionHeading("Viewport", "crop_3_2_24dp_E3E3E3.svg"))
         layout.addLayout(overridesForm)
         layout.addSpacing(8)
-        layout.addWidget(SectionHeading("Preview"))
+        layout.addWidget(SectionHeading("Preview", "visibility_24dp_E3E3E3.svg"))
         layout.addLayout(previewForm)
         layout.addSpacing(8)
-        layout.addWidget(SectionHeading("Appearance"))
+        layout.addWidget(SectionHeading("Appearance", "palette_24dp_E3E3E3.svg"))
         layout.addLayout(systemForm)
         layout.addLayout(buttonLayout)
         self.UpdateTransferOverrideControls()
@@ -959,9 +839,9 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         layout.addWidget(sidebarHeader, 0)
 
         self.sidebarTabs = QtWidgets.QTabWidget()
-        self.sidebarTabs.addTab(self._BuildInputGroup(), "Images")
-        self.sidebarTabs.addTab(self._BuildBlendGroup(), "Blend")
-        self.sidebarTabs.addTab(self._BuildOutputGroup(), "Export")
+        self.sidebarTabs.addTab(self.SidebarScrollPage(self._BuildInputGroup()), "Images")
+        self.sidebarTabs.addTab(self.SidebarScrollPage(self._BuildBlendGroup()), "Blend")
+        self.sidebarTabs.addTab(self.SidebarScrollPage(self._BuildOutputGroup()), "Export")
         self.sidebarTabs.setIconSize(QtCore.QSize(18, 18))
         self.RefreshSidebarTabIcons()
 
@@ -969,6 +849,32 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         layout.addWidget(self._BuildRenderActionFooter(), 0)
 
         return sidebar
+
+    def SidebarScrollPage(self, page):
+        scrollArea = QtWidgets.QScrollArea()
+        scrollArea.setObjectName("sidebarScrollPage")
+        scrollArea.setWidgetResizable(True)
+        scrollArea.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scrollArea.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scrollArea.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scrollArea.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
+        scrollArea.setMinimumHeight(0)
+        page.setMinimumWidth(0)
+        page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        scrollArea.setWidget(page)
+        self.sidebarScrollPages = getattr(self, "sidebarScrollPages", {})
+        self.sidebarScrollPages[scrollArea.viewport()] = page
+        scrollArea.viewport().installEventFilter(self)
+        QtCore.QTimer.singleShot(0, lambda viewport = scrollArea.viewport(): self.SyncSidebarScrollPageWidth(viewport))
+        return scrollArea
+
+    def SyncSidebarScrollPageWidth(self, viewport):
+        page = getattr(self, "sidebarScrollPages", {}).get(viewport)
+        if page is None:
+            return
+        width = max(1, viewport.width())
+        if page.width() != width:
+            page.setFixedWidth(width)
 
     def AddHeaderMenuButton(self, menu, iconName, text, shortcutText):
         action = QtWidgets.QWidgetAction(menu)
@@ -1044,9 +950,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             (self.blendMode.currentIndexChanged, "Blend"),
             (self.decay.valueChanged, "Blend"),
             (self.pairDistanceSpinBox.valueChanged, "Blend"),
+            (self.pairBlurSpinBox.valueChanged, "Blend"),
+            (self.pairBlurKernel.currentTextChanged, "Blend"),
             (self.stackSizeSpinBox.valueChanged, "Blend"),
+            (self.stackDirection.currentTextChanged, "Blend"),
             (self.blendScaleSpinBox.valueChanged, "Blend"),
             (self.blendOffsetSpinBox.valueChanged, "Blend"),
+            (self.absoluteValues.toggled, "Blend"),
             (self.opacity.valueChanged, "Blend"),
             (self.outputDirectory.textChanged, "Export"),
             (self.outputFileName.textChanged, "Export"),
@@ -1072,13 +982,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         )
         for signal, section in trackedSignals:
             signal.connect(lambda *args, section = section: self.MarkProjectDirty(section = section))
-        self.renderPathGroup.idClicked.connect(lambda *_: self.MarkProjectDirty(section = "Blend"))
 
         dragTrackedSliders = (
             self.decay.slider,
             self.opacity.slider,
             self.middleGray.slider,
             self.pairDistanceSlider,
+            self.pairBlurSlider,
             self.stackSizeSlider,
             self.blendScaleSlider,
             self.blendOffsetSlider,
@@ -1134,6 +1044,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.middleGray.spinBox,
             self.decay.spinBox,
             self.pairDistanceSpinBox,
+            self.pairBlurSpinBox,
             self.stackSizeSpinBox,
             self.blendScaleSpinBox,
             self.blendOffsetSpinBox,
@@ -1150,9 +1061,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.fileMenu.popup(self.fileMenuButton.mapToGlobal(menuPosition))
 
     def RefreshFileMenuState(self):
+        hasClosableProject = bool(self.currentProjectPath or self.projectDirty)
         self.SetHeaderMenuButtonSoftEnabled(
             self.newProjectButton,
-            bool(self.currentProjectPath or self.projectDirty),
+            hasClosableProject,
+        )
+        self.SetHeaderMenuButtonSoftEnabled(
+            self.closeProjectButton,
+            hasClosableProject,
         )
 
     def ShowEditMenu(self):
@@ -1201,8 +1117,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         if self.runActive:
             return
 
-        self.themeSelector.setCurrentText("Dark Fire")
-        self.SetTheme("Dark Fire")
+        self.themeSelector.setCurrentText("Dark Ice")
+        self.SetTheme("Dark Ice")
         self.viewportBackgroundOverride = None
         self.SyncViewportBackgroundControls()
         self.ApplyViewportBackground()
@@ -1273,7 +1189,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         if self.renderLogDialog is None:
             dialog = QtWidgets.QDialog(self)
             dialog.setWindowTitle("Console")
-            dialog.setWindowIcon(DarkAssetIcon("terminal_24dp_E3E3E3.svg"))
+            dialog.setWindowIcon(QtGui.QIcon(ThemeAppIconPath(ThemeName())))
             dialog.setModal(False)
             dialog.setWindowFlags(
                 dialog.windowFlags()
@@ -1321,8 +1237,20 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         if self.renderLogText is None:
             return
 
+        if self.renderLogDialog is not None:
+            self.renderLogDialog.setWindowIcon(QtGui.QIcon(ThemeAppIconPath(ThemeName())))
+
         consoleBackground = ThemeColor("CONSOLE_BG")
         self.renderLogText.setStyleSheet(
+            f"QPlainTextEdit {{ background: {consoleBackground}; border: 1px solid {consoleBackground}; }}"
+        )
+
+    def RefreshLicensesTheme(self):
+        if getattr(self, "licensesText", None) is None:
+            return
+
+        consoleBackground = ThemeColor("CONSOLE_BG")
+        self.licensesText.setStyleSheet(
             f"QPlainTextEdit {{ background: {consoleBackground}; border: 1px solid {consoleBackground}; }}"
         )
 
@@ -1469,7 +1397,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         return button
 
     def SetTheme(self, themeName):
-        themeName = str(themeName or "dark_fire").lower()
+        themeName = str(themeName or "dark_ice").lower()
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.setStyleSheet(BuildStyle(themeName))
@@ -1479,6 +1407,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.SyncViewportBackgroundControls()
         self.ApplyViewportBackground()
         self.RefreshRenderLogTheme()
+        self.RefreshLicensesTheme()
         self.RefreshThemeIcons()
 
     def DefaultViewportBackgroundValue(self):
@@ -1525,6 +1454,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
     def RefreshThemeIcons(self):
         if hasattr(self, "inputFileListDelegate"):
             self.inputFileListDelegate.RefreshIcons()
+        for heading in self.findChildren(QtWidgets.QWidget, "sectionHeading"):
+            if hasattr(heading, "RefreshIcon"):
+                heading.RefreshIcon()
+        if hasattr(self, "stackSizeWarningIcon"):
+            self.stackSizeWarningIcon.setPixmap(self.TintedAssetPixmap("warning_24dp_E3E3E3.svg", "WARNING", 18))
+        self.UpdateStackMemoryEstimate()
         self.RefreshStackerTextLogo()
         self.RefreshSidebarTabIcons()
         self.RefreshInputFileList()
@@ -1567,6 +1502,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 viewport.RefreshEmptyIcon()
         if hasattr(self, "sortInputFilesButton"):
             self.sortInputFilesButton.setIcon(AssetIcon("sort_by_alpha_24dp_E3E3E3.svg"))
+        if hasattr(self, "sortInputFilesNumericButton"):
+            self.sortInputFilesNumericButton.setIcon(AssetIcon("sort_by_num_24dp_E3E3E3.svg"))
         if hasattr(self, "reverseInput"):
             self.reverseInput.setIcon(AssetIcon("reverse_24dp_E3E3E3.svg"))
         if hasattr(self, "syncInputSelectionButton"):
@@ -1575,6 +1512,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.markInputInButton.setIcon(SplitAssetIcon("data_array_24dp_E3E3E3.svg", "left"))
         if hasattr(self, "markInputOutButton"):
             self.markInputOutButton.setIcon(SplitAssetIcon("data_array_24dp_E3E3E3.svg", "right"))
+        if hasattr(self, "clearInputRangeButton"):
+            self.clearInputRangeButton.setIcon(AssetIcon("clear_range_24dp_E3E3E3.svg"))
         if hasattr(self, "moveInputFileUpButton"):
             self.moveInputFileUpButton.setIcon(AssetIcon("move_up_24dp_E3E3E3.svg"))
         if hasattr(self, "moveInputFileDownButton"):
@@ -1693,7 +1632,6 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         layout = QtWidgets.QFormLayout(group)
         layout.setContentsMargins(14, 14, 14, 14)
         ConfigureFormLayout(layout)
-        layout.addRow(SectionHeading("Images"))
 
         self.inputDirectory = FolderField("", dialogTitle = "Select Image Folder")
         self.inputDirectory.pathBrowsed.connect(self.AddInputFolderToRenderList)
@@ -1743,15 +1681,20 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.addInputFileButton.setText(IconButtonText("Add Images"))
         self.addInputFileButton.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addInputFileButton.setToolTip("Add one or more images")
+        self.addInputFileButton.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.addInputFileButton.clicked.connect(self.OpenInputFileBrowser)
 
         self.inputDirectory.button.setText(IconButtonText("Add Folder"))
         self.inputDirectory.button.setIcon(AssetIcon("add_folder_24dp_E3E3E3.svg"))
         self.inputDirectory.button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.inputDirectory.button.setToolTip("Add all images from a folder")
+        self.inputDirectory.button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
         self.sortInputFilesButton = self.CreateInputToolButton("sort_by_alpha_24dp_E3E3E3.svg", "Sort alphabetically")
         self.sortInputFilesButton.clicked.connect(self.SortInputFileList)
+
+        self.sortInputFilesNumericButton = self.CreateInputToolButton("sort_by_num_24dp_E3E3E3.svg", "Sort numerically")
+        self.sortInputFilesNumericButton.clicked.connect(self.SortInputFileListNumerically)
 
         self.reverseInput = self.CreateInputToolButton("reverse_24dp_E3E3E3.svg", "Reverse image list")
         self.reverseInput.clicked.connect(self.ReverseInputList)
@@ -1768,6 +1711,9 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.markInputOutButton = self.CreateInputToolButton("data_array_24dp_E3E3E3.svg", "Mark out from selected image")
         self.markInputOutButton.setIcon(SplitAssetIcon("data_array_24dp_E3E3E3.svg", "right"))
         self.markInputOutButton.clicked.connect(lambda: self.MarkRangeFromFileList("out"))
+
+        self.clearInputRangeButton = self.CreateInputToolButton("clear_range_24dp_E3E3E3.svg", "Clear trim range")
+        self.clearInputRangeButton.clicked.connect(self.ResetTrimRange)
 
         self.moveInputFileUpButton = self.CreateInputToolButton("move_up_24dp_E3E3E3.svg", "Move up")
         self.moveInputFileUpButton.clicked.connect(lambda: self.MoveSelectedInputFilesBy(-1))
@@ -1794,30 +1740,45 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.rangeField.handleDragEnded.connect(self.RangeHandleDragEnded)
         self.rangeField.SetDisplayReversed(False)
 
-        inputToolbar = QtWidgets.QWidget()
-        inputToolbarLayout = QtWidgets.QHBoxLayout(inputToolbar)
-        inputToolbarLayout.setContentsMargins(0, 0, 0, 8)
-        inputToolbarLayout.setSpacing(10)
-        inputToolbarLayout.addWidget(self.addInputFileButton)
-        inputToolbarLayout.addWidget(self.inputDirectory.button)
-        inputToolbarLayout.addStretch(1)
-        inputToolbarLayout.addWidget(self.sortInputFilesButton)
-        inputToolbarLayout.addWidget(self.reverseInput)
-        inputToolbarLayout.addWidget(self.moveInputFileUpButton)
-        inputToolbarLayout.addWidget(self.moveInputFileDownButton)
-        layout.addRow(inputToolbar)
-        layout.addRow(self.inputFileList)
+        inputAddToolbar = QtWidgets.QWidget()
+        inputAddToolbarLayout = QtWidgets.QHBoxLayout(inputAddToolbar)
+        inputAddToolbarLayout.setContentsMargins(0, 0, 0, 2)
+        inputAddToolbarLayout.setSpacing(10)
+        inputAddToolbarLayout.addWidget(self.addInputFileButton, 1)
+        inputAddToolbarLayout.addWidget(self.inputDirectory.button, 1)
+        layout.addRow(inputAddToolbar)
+
+        inputFileListField = QtWidgets.QWidget()
+        inputFileListLayout = QtWidgets.QHBoxLayout(inputFileListField)
+        inputFileListLayout.setContentsMargins(0, 0, 0, 0)
+        inputFileListLayout.setSpacing(8)
+        inputFileListLayout.addWidget(self.inputFileList, 1)
+
+        inputFileListSortToolbar = QtWidgets.QWidget()
+        inputFileListSortToolbar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+        inputFileListSortLayout = QtWidgets.QVBoxLayout(inputFileListSortToolbar)
+        inputFileListSortLayout.setContentsMargins(0, 0, 0, 0)
+        inputFileListSortLayout.setSpacing(6)
+        inputFileListSortLayout.addWidget(self.moveInputFileUpButton)
+        inputFileListSortLayout.addWidget(self.moveInputFileDownButton)
+        inputFileListSortLayout.addWidget(self.reverseInput)
+        inputFileListSortLayout.addWidget(self.sortInputFilesButton)
+        inputFileListSortLayout.addWidget(self.sortInputFilesNumericButton)
+        inputFileListSortLayout.addStretch(1)
+        inputFileListSortLayout.addWidget(self.markInputInButton)
+        inputFileListSortLayout.addWidget(self.markInputOutButton)
+        inputFileListSortLayout.addWidget(self.clearInputRangeButton)
+        inputFileListSortLayout.addWidget(self.syncInputSelectionButton)
+        inputFileListLayout.addWidget(inputFileListSortToolbar, 0)
+        layout.addRow(inputFileListField)
 
         fileListButtonRow = QtWidgets.QWidget()
         fileListButtonLayout = QtWidgets.QHBoxLayout(fileListButtonRow)
         fileListButtonLayout.setContentsMargins(0, 0, 0, 0)
         fileListButtonLayout.setSpacing(8)
-        fileListButtonLayout.addWidget(self.syncInputSelectionButton)
-        fileListButtonLayout.addWidget(self.markInputInButton)
-        fileListButtonLayout.addWidget(self.markInputOutButton)
-        fileListButtonLayout.addStretch(1)
         fileListButtonLayout.addWidget(self.removeInputFileButton)
         fileListButtonLayout.addWidget(self.removeAllInputFilesButton)
+        fileListButtonLayout.addStretch(1)
         layout.addRow(fileListButtonRow)
 
         skipInputRow = QtWidgets.QWidget()
@@ -1829,7 +1790,6 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         skipInputLayout.addStretch(1)
         layout.addRow(skipInputRow)
 
-        self.AddFixedFormRow(layout, "Input Curve", OverrideField(self.inputTransferFunction, self.overrideInputTransfer), self.IO_LABEL_WIDTH)
         self.UpdateInputFileActionButtons()
 
         return group
@@ -1849,12 +1809,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(group)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
-        layout.addWidget(SectionHeading("Export"))
 
         self.outputDirectory = FolderField("", dialogTitle = "Select Export Folder")
         self.outputDirectory.textChanged.connect(self.UpdateOutputViewport)
         self.outputFileName = QtWidgets.QLineEdit("frame")
         self.outputFileName.textChanged.connect(self.UpdateOutputViewport)
+        self.outputFileName.textChanged.connect(self.UpdateOutputSequenceSuffixLabel)
 
         self.outputFileType = DownwardComboBox()
         self.outputFileType.setEditable(False)
@@ -1868,6 +1828,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self._BuildOutputOptionsPanel()
         self.outputFileType.currentTextChanged.connect(self.UpdateOutputOptionsPanel)
         self.outputFileType.currentTextChanged.connect(self.UpdateOutputViewport)
+        self.outputFileType.currentTextChanged.connect(self.UpdateOutputSequenceSuffixLabel)
 
         form = QtWidgets.QFormLayout()
         ConfigureFormLayout(form)
@@ -1877,20 +1838,21 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             spacer.setFixedHeight(6)
             form.addRow(spacer)
 
-        form.addRow(SectionHeading("Output"))
+        form.addRow(SectionHeading("Output", "save_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(form, "Folder", self.outputDirectory, self.IO_LABEL_WIDTH)
         self.outputNameTypeField = OutputNameTypeField(self.outputFileName, self.outputFileType, self.outputOptionsButton)
+        self.UpdateOutputSequenceSuffixLabel()
         self.AddFixedFormRow(form, "Filename", self.outputNameTypeField, self.IO_LABEL_WIDTH)
         AddSectionGap()
-        form.addRow(SectionHeading("Resolution"))
+        form.addRow(SectionHeading("Resolution", "image_aspect_ratio_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(form, "Export Resolution", OverrideField(ResolutionField(self.overrideWidth, self.overrideHeight), self.overrideResolution), self.IO_LABEL_WIDTH)
         self.AddFixedFormRow(form, "Export Scaling", self.resizeFilter, self.IO_LABEL_WIDTH)
         AddSectionGap()
-        form.addRow(SectionHeading("Blending"))
+        form.addRow(SectionHeading("Blending", "opacity_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(form, "", CheckboxField(self.blendInLinear), self.IO_LABEL_WIDTH)
         self.AddFixedFormRow(form, "Middle Gray", OverrideField(self.middleGrayField, self.useCustomMiddleGray), self.IO_LABEL_WIDTH)
         AddSectionGap()
-        form.addRow(SectionHeading("Color"))
+        form.addRow(SectionHeading("Color", "gamma_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(form, "Output Curve", OverrideField(self.outputTransferFunction, self.overrideOutputTransfer), self.IO_LABEL_WIDTH)
         AddSectionGap()
         self.AddFixedFormRow(form, "Only export every", self.skipOutput, self.IO_LABEL_WIDTH)
@@ -1905,7 +1867,6 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         outerLayout = QtWidgets.QVBoxLayout(group)
         outerLayout.setContentsMargins(14, 14, 14, 14)
         outerLayout.setSpacing(12)
-        outerLayout.addWidget(SectionHeading("Blend"))
 
         layout = QtWidgets.QFormLayout()
         ConfigureFormLayout(layout)
@@ -1917,7 +1878,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.blendMode.currentIndexChanged.connect(self.UpdateBlendControlsEnabled)
         self.blendMode.currentIndexChanged.connect(self.UpdatePresetDirtyIndicator)
 
-        self.decay = FloatSlider(0.5, decimals = 3)
+        self.decay = FloatSlider(1.0, decimals = 3)
         self.decay.valueChanged.connect(self.UpdatePresetDirtyIndicator)
         self.decay.valueChanged.connect(self.UpdateBlendResetButtons)
         self.opacity = FloatSlider(1.0, decimals = 3)
@@ -1939,6 +1900,28 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             "shift",
             "Reset shift",
         )
+        self.pairBlurSlider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.pairBlurSlider.setRange(0, 20)
+        self.pairBlurSlider.setMinimumHeight(26)
+        self.pairBlurSpinBox = QtWidgets.QSpinBox()
+        self.pairBlurSpinBox.setRange(0, 9999)
+        self.pairBlurSpinBox.setFixedWidth(72)
+        self.pairBlurSlider.valueChanged.connect(self.pairBlurSpinBox.setValue)
+        self.pairBlurSpinBox.valueChanged.connect(self.PairBlurSpinBoxChanged)
+        self.pairBlurSpinBox.valueChanged.connect(self.UpdatePresetDirtyIndicator)
+        self.pairBlurSpinBox.valueChanged.connect(self.UpdateBlendControlsEnabled)
+        self.pairBlurSpinBox.valueChanged.connect(self.UpdateBlendResetButtons)
+        self.pairBlurSpinBox.setValue(0)
+        self.pairBlurField = self.BlendResetField(
+            SliderSpinBoxField(self.pairBlurSlider, self.pairBlurSpinBox),
+            "blur",
+            "Reset temporal blur",
+        )
+        self.pairBlurKernel = DownwardComboBox()
+        self.pairBlurKernel.setEditable(False)
+        self.pairBlurKernel.addItems(("Box", "Triangle", "Semicircle", "Gaussian", "Cosine", "Exponential"))
+        self.pairBlurKernel.setCurrentText("Gaussian")
+        self.pairBlurKernel.currentTextChanged.connect(self.UpdatePresetDirtyIndicator)
         self.stackSizeSlider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.stackSizeSlider.setRange(1, 20)
         self.stackSizeSlider.setMinimumHeight(26)
@@ -1955,6 +1938,11 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             "size",
             "Reset size",
         )
+        self.stackDirection = DownwardComboBox()
+        self.stackDirection.setEditable(False)
+        self.stackDirection.addItems(("Past", "Future", "Centered"))
+        self.stackDirection.setCurrentText("Past")
+        self.stackDirection.currentTextChanged.connect(self.UpdatePresetDirtyIndicator)
 
         self.blendScaleSlider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.blendScaleSlider.setRange(0, 2000)
@@ -1995,21 +1983,31 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             "lift",
             "Reset lift",
         )
+        self.absoluteValues = QtWidgets.QCheckBox("Absolute Values")
+        self.absoluteValues.setToolTip("Fold negative adjusted RGB values back above zero.")
+        self.absoluteValues.toggled.connect(self.UpdatePresetDirtyIndicator)
 
         self.activePresetCleanData = None
         self.presetComboBox = DownwardComboBox()
+        self.presetComboBox.setObjectName("presetComboBox")
+        presetFont = self.presetComboBox.font()
+        presetFont.setPointSize(presetFont.pointSize() + 1)
+        self.presetComboBox.setFont(presetFont)
+        self.presetComboBox.setMinimumHeight(34)
         self.presetComboBox.currentIndexChanged.connect(self.LoadSelectedPreset)
         self.presetComboBox.activated.connect(self.LoadSelectedPreset)
         self.savePresetButton = QtWidgets.QPushButton(IconButtonText("Save Preset"))
         self.savePresetButton.setObjectName("savePresetButton")
+        self.savePresetButton.setFont(presetFont)
+        self.savePresetButton.setMinimumHeight(34)
         self.savePresetButton.setIcon(AssetIcon("add_24dp_E3E3E3.svg"))
         self.savePresetButton.clicked.connect(self.SaveBlendPreset)
         self.RefreshPresetList()
 
-        layout.addRow(SectionHeading("temp_heading1"))
-        self.AddFixedFormRow(layout, "Preset", ButtonComboField(self.presetComboBox, self.savePresetButton), self.BLEND_LABEL_WIDTH)
-        self.AddFormGap(layout, 6)
-        layout.addRow(SectionHeading("temp_heading2"))
+        self.AddFormGap(layout, 3)
+        layout.addRow(ButtonComboField(self.presetComboBox, self.savePresetButton))
+        self.AddFormGap(layout, 3)
+        layout.addRow(SectionHeading("Blend", "opacity_24dp_E3E3E3.svg"))
         self.renderPathGroup = QtWidgets.QButtonGroup(self)
         self.renderPathGroup.setExclusive(True)
         self.renderPathMode0 = QtWidgets.QPushButton(IconButtonText("Gather"))
@@ -2028,7 +2026,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.renderPathGroup.addButton(button, path)
         self.renderPathMode0.setChecked(True)
         self.renderPathGroup.idClicked.connect(self.UpdateRenderPathControls)
-        self.renderPathGroup.idClicked.connect(self.UpdatePresetDirtyIndicator)
+        self.renderPathGroup.idClicked.connect(self.RenderPathClicked)
 
         renderPathField = QtWidgets.QWidget()
         renderPathLayout = QtWidgets.QHBoxLayout(renderPathField)
@@ -2037,7 +2035,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         renderPathLayout.addWidget(self.renderPathMode0)
         renderPathLayout.addWidget(self.renderPathMode1)
         renderPathLayout.addWidget(self.renderPathMode2)
-        self.AddFixedFormRow(layout, "", renderPathField, self.BLEND_LABEL_WIDTH)
+        layout.addRow(renderPathField)
         self.AddFixedFormRow(layout, "Blend", self.blendMode, self.BLEND_LABEL_WIDTH)
         self.decayLabel = QtWidgets.QLabel("Spread")
         self.decayLabel.setFixedWidth(self.BLEND_LABEL_WIDTH)
@@ -2048,22 +2046,69 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.pairDistanceLabel.setFixedWidth(self.BLEND_LABEL_WIDTH)
         self.pairDistanceLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         layout.addRow(self.pairDistanceLabel, self.pairDistanceField)
+        self.pairBlurLabel = QtWidgets.QLabel("Temporal Blur")
+        self.pairBlurLabel.setFixedWidth(self.BLEND_LABEL_WIDTH)
+        self.pairBlurLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addRow(self.pairBlurLabel, self.pairBlurField)
+        self.pairKernelLabel = QtWidgets.QLabel("Kernel")
+        self.pairKernelLabel.setFixedWidth(self.BLEND_LABEL_WIDTH)
+        self.pairKernelLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addRow(self.pairKernelLabel, self.pairBlurKernel)
         self.stackSizeLabel = QtWidgets.QLabel("Size")
         self.stackSizeLabel.setFixedWidth(self.BLEND_LABEL_WIDTH)
         self.stackSizeLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         layout.addRow(self.stackSizeLabel, self.stackSizeField)
-        self.stackSizeWarningLabel = QtWidgets.QLabel("Warning: Large stack sizes can significantly slow render times.")
+        self.stackMemoryIcon = QtWidgets.QLabel()
+        self.stackMemoryIcon.setFixedSize(18, 18)
+        self.stackMemoryIcon.hide()
+        self.stackMemoryLabel = QtWidgets.QLabel("Memory Required: --")
+        self.stackMemoryLabel.setStyleSheet("font-style: italic;")
+        self.stackMemoryLabel.setToolTip("Estimated stack memory for the current render, compared against currently available RAM.")
+        self.stackMemoryDetailLabel = QtWidgets.QLabel("")
+        self.stackMemoryDetailLabel.setStyleSheet("font-style: italic;")
+        self.stackMemoryDetailLabel.hide()
+        self.stackMemoryField = QtWidgets.QWidget()
+        stackMemoryOuterLayout = QtWidgets.QHBoxLayout(self.stackMemoryField)
+        stackMemoryOuterLayout.setContentsMargins(0, 0, 0, 0)
+        stackMemoryOuterLayout.setSpacing(6)
+        stackMemoryTextLayout = QtWidgets.QVBoxLayout()
+        stackMemoryTextLayout.setContentsMargins(0, 0, 0, 0)
+        stackMemoryTextLayout.setSpacing(1)
+        stackMemoryTextLayout.addWidget(self.stackMemoryLabel)
+        stackMemoryTextLayout.addWidget(self.stackMemoryDetailLabel)
+        stackMemoryLayout = stackMemoryOuterLayout
+        stackMemoryLayout.setContentsMargins(0, 0, 0, 0)
+        stackMemoryLayout.addWidget(self.stackMemoryIcon)
+        stackMemoryLayout.addLayout(stackMemoryTextLayout, 1)
+        self.stackMemoryField.hide()
+        self.stackMemorySpacer = self.AddFixedFormRow(layout, "", self.stackMemoryField, self.BLEND_LABEL_WIDTH)
+        self.stackMemorySpacer.hide()
+        self.stackSizeWarningIcon = QtWidgets.QLabel()
+        self.stackSizeWarningIcon.setFixedSize(18, 18)
+        self.stackSizeWarningIcon.setPixmap(self.TintedAssetPixmap("warning_24dp_E3E3E3.svg", "WARNING", 18))
+        self.stackSizeWarningLabel = QtWidgets.QLabel("Large stack sizes can significantly slow render times.")
         self.stackSizeWarningLabel.setObjectName("warningLabel")
         self.stackSizeWarningLabel.setWordWrap(True)
-        self.stackSizeWarningLabel.hide()
-        self.stackSizeWarningSpacer = self.AddFixedFormRow(layout, "", self.stackSizeWarningLabel, self.BLEND_LABEL_WIDTH)
+        self.stackSizeWarningField = QtWidgets.QWidget()
+        stackSizeWarningLayout = QtWidgets.QHBoxLayout(self.stackSizeWarningField)
+        stackSizeWarningLayout.setContentsMargins(0, 0, 0, 0)
+        stackSizeWarningLayout.setSpacing(6)
+        stackSizeWarningLayout.addWidget(self.stackSizeWarningIcon)
+        stackSizeWarningLayout.addWidget(self.stackSizeWarningLabel, 1)
+        self.stackSizeWarningField.hide()
+        self.stackSizeWarningSpacer = self.AddFixedFormRow(layout, "", self.stackSizeWarningField, self.BLEND_LABEL_WIDTH)
         self.stackSizeWarningSpacer.hide()
+        self.stackDirectionLabel = QtWidgets.QLabel("Direction")
+        self.stackDirectionLabel.setFixedWidth(self.BLEND_LABEL_WIDTH)
+        self.stackDirectionLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addRow(self.stackDirectionLabel, self.stackDirection)
         self.AddFormGap(layout, 6)
-        layout.addRow(SectionHeading("Post Blend"))
+        layout.addRow(SectionHeading("Adjustment", "tune_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(layout, "Gain", self.blendScaleField, self.BLEND_LABEL_WIDTH)
         self.AddFixedFormRow(layout, "Lift", self.blendOffsetField, self.BLEND_LABEL_WIDTH)
+        self.AddFixedFormRow(layout, "", CheckboxField(self.absoluteValues), self.BLEND_LABEL_WIDTH)
         self.AddFormGap(layout, 6)
-        layout.addRow(SectionHeading("temp_heading3"))
+        layout.addRow(SectionHeading("Final Composite", "texture_24dp_E3E3E3.svg"))
         self.opacityField = self.BlendResetField(self.opacity, "intensity", "Reset intensity")
         self.AddFixedFormRow(layout, "Intensity", self.opacityField, self.BLEND_LABEL_WIDTH)
         self.AddFormGap(layout, 6)
@@ -2240,13 +2285,24 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
     def AboutLogoPixmap(self, targetSize = 256):
         return QtGui.QIcon(ThemeAboutLogoPath(ThemeName())).pixmap(targetSize, targetSize)
 
-    def CreateAboutLinkItem(self, iconName, text, url = ""):
+    def CreateAboutLinkItem(self, iconName, text, url = "", actionName = ""):
         item = QtWidgets.QWidget()
+        if url:
+            item.setProperty("aboutUrl", url)
+        if actionName:
+            item.setProperty("aboutAction", actionName)
+        if url or actionName:
+            item.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         layout = QtWidgets.QHBoxLayout(item)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
         iconLabel = QtWidgets.QLabel()
+        if url:
+            iconLabel.setProperty("aboutUrl", url)
+        if actionName:
+            iconLabel.setProperty("aboutAction", actionName)
+            iconLabel.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         iconSize = 28
         iconLabel.setFixedSize(iconSize, iconSize)
         if iconName == "github":
@@ -2262,18 +2318,92 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             textLabel = QtWidgets.QLabel(
                 f'<a href="{url}" style="color: {textColor}; text-decoration: underline;">{html.escape(text)}</a>'
             )
+            textLabel.setProperty("aboutUrl", url)
             textLabel.setOpenExternalLinks(True)
             textLabel.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
         else:
-            textLabel = QtWidgets.QLabel(text)
+            if actionName:
+                textColor = ThemeColor("TEXT")
+                textLabel = QtWidgets.QLabel(
+                    f'<span style="color: {textColor}; text-decoration: underline;">{html.escape(text)}</span>'
+                )
+            else:
+                textLabel = QtWidgets.QLabel(text)
+            if actionName:
+                textLabel.setProperty("aboutAction", actionName)
+                textLabel.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         layout.addWidget(textLabel)
         return item
 
-    def ShowAboutDialog(self):
+    def LicensesText(self):
+        path = os.path.join(AppRoot(), "LICENSES.txt")
+        try:
+            with open(path, "r", encoding = "utf-8") as file:
+                return file.read()
+        except OSError:
+            return "Licenses file could not be loaded."
+
+    def ShowLicensesDialog(self):
+        if getattr(self, "licensesDialog", None) is not None and self.licensesDialog.isVisible():
+            self.licensesDialog.raise_()
+            self.licensesDialog.activateWindow()
+            return
+
         dialog = QtWidgets.QDialog(self)
+        self.licensesDialog = dialog
+        dialog.setWindowTitle("Licenses")
+        dialog.setWindowIcon(StatusAssetIcon("info"))
+        dialog.setModal(False)
+        dialog.setWindowFlags(
+            dialog.windowFlags()
+            | QtCore.Qt.WindowType.WindowMinimizeButtonHint
+            | QtCore.Qt.WindowType.WindowMaximizeButtonHint
+        )
+        dialog.resize(760, 560)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        text = QtWidgets.QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        text.setPlainText(self.LicensesText())
+        text.setStyleSheet(
+            f"QPlainTextEdit {{ background: {ThemeColor('CONSOLE_BG')}; border: 1px solid {ThemeColor('CONSOLE_BG')}; }}"
+        )
+        self.licensesText = text
+        layout.addWidget(text, 1)
+
+        buttonRow = QtWidgets.QHBoxLayout()
+        buttonRow.addStretch(1)
+        closeButton = QtWidgets.QPushButton("Close")
+        closeButton.clicked.connect(dialog.close)
+        buttonRow.addWidget(closeButton)
+        layout.addLayout(buttonRow)
+
+        def LicensesDialogClosed(*_):
+            self.licensesDialog = None
+            self.licensesText = None
+
+        dialog.finished.connect(LicensesDialogClosed)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def ShowAboutDialog(self):
+        existingDialog = getattr(self, "aboutDialog", None)
+        if existingDialog and existingDialog.isVisible():
+            existingDialog.raise_()
+            existingDialog.activateWindow()
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        self.aboutDialog = dialog
         dialog.setWindowTitle(f"About {APP_NAME}")
         dialog.setWindowIcon(StatusAssetIcon("info"))
-        dialog.setMinimumWidth(420)
+        dialog.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
+        dialog.setMinimumWidth(600)
 
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 18)
@@ -2281,7 +2411,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         iconLabel = QtWidgets.QLabel()
         iconLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        iconPixmap = self.AboutLogoPixmap(384)
+        iconPixmap = self.AboutLogoPixmap(300)
         if not iconPixmap.isNull():
             iconLabel.setPixmap(iconPixmap)
         layout.addWidget(iconLabel, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -2292,33 +2422,67 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         versionLabel.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(versionLabel)
 
+        copyrightRow = QtWidgets.QHBoxLayout()
+        copyrightRow.setContentsMargins(0, 0, 0, 0)
+        copyrightRow.setSpacing(6)
+        copyrightRow.addStretch(1)
+        copyrightIcon = QtWidgets.QLabel()
+        copyrightIcon.setFixedSize(18, 18)
+        copyrightIcon.setPixmap(AssetIcon("copyright_24dp_E3E3E3.svg").pixmap(18, 18))
+        copyrightRow.addWidget(copyrightIcon)
         copyrightLabel = QtWidgets.QLabel(APP_COPYRIGHT)
-        copyrightLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         copyrightLabel.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(copyrightLabel)
+        copyrightRow.addWidget(copyrightLabel)
+        copyrightRow.addStretch(1)
+        layout.addLayout(copyrightRow)
+
+        layout.addSpacing(8)
+        descriptionLabel = QtWidgets.QLabel(APP_DESCRIPTION)
+        descriptionLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        descriptionLabel.setWordWrap(True)
+        descriptionLabel.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        descriptionRow = QtWidgets.QHBoxLayout()
+        descriptionRow.setContentsMargins(64, 0, 64, 0)
+        descriptionRow.addWidget(descriptionLabel)
+        layout.addLayout(descriptionRow)
 
         layout.addSpacing(32)
         linkRow = QtWidgets.QHBoxLayout()
         linkRow.setContentsMargins(0, 0, 0, 0)
-        linkRow.setSpacing(18)
+        linkRow.setSpacing(32)
         linkRow.addStretch(1)
         linkRow.addWidget(self.CreateAboutLinkItem("github", "Github", APP_GITHUB_URL))
         linkRow.addSpacing(8)
         linkRow.addWidget(self.CreateAboutLinkItem("bug_report_24dp_E3E3E3.svg", "Report Issue"))
         linkRow.addSpacing(8)
-        linkRow.addWidget(self.CreateAboutLinkItem("attribution_24dp_E3E3E3.svg", "Licenses"))
+        linkRow.addWidget(self.CreateAboutLinkItem("attribution_24dp_E3E3E3.svg", "Licenses", actionName = "licenses"))
         linkRow.addStretch(1)
         layout.addLayout(linkRow)
+        layout.addSpacing(24)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok)
-        buttons.accepted.connect(dialog.accept)
-        layout.addSpacing(32)
-        layout.addWidget(buttons)
+        dismissFilter = ClickDismissFilter(dialog, {"licenses": self.ShowLicensesDialog})
+        self.aboutDismissFilter = dismissFilter
+        app = QtWidgets.QApplication.instance()
+        if app:
+            app.installEventFilter(dismissFilter)
 
-        dialog.exec()
+        def CleanupAboutDialog():
+            if app and dismissFilter:
+                app.removeEventFilter(dismissFilter)
+            if getattr(self, "aboutDialog", None) is dialog:
+                self.aboutDialog = None
+            if dismissFilter and getattr(self, "aboutDismissFilter", None) is dismissFilter:
+                self.aboutDismissFilter = None
+
+        dialog.finished.connect(CleanupAboutDialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def OpenOutputOptionsPanel(self):
         self.UpdateOutputOptionsPanel()
+        if hasattr(self, "outputOptionsButton") and not self.outputOptionsButton.isEnabled():
+            return
         self.outputOptionsPanel.show()
         self.outputOptionsPanel.raise_()
         self.outputOptionsPanel.activateWindow()
@@ -2343,8 +2507,22 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.exportButton.setText(IconButtonText("Export Sequence"))
         if hasattr(self, "outputNameTypeField") and hasattr(self.outputNameTypeField, "sequenceSuffixLabel"):
             self.outputNameTypeField.sequenceSuffixLabel.setVisible(mode != "final")
+            self.UpdateOutputSequenceSuffixLabel()
         if mode != oldMode:
             self.MarkProjectDirty(section = "Export")
+
+    def OutputSequenceFrameDigits(self):
+        frameCount = len(self.InputReadFilenames()) if hasattr(self, "inputFileEntries") else 0
+        skip = max(1, self.skipOutput.value()) if hasattr(self, "skipOutput") else 1
+        outputFrameCount = ((frameCount - 1) // skip) + 1 if frameCount > 0 else 1
+        return max(4, len(str(max(0, outputFrameCount - 1))))
+
+    def UpdateOutputSequenceSuffixLabel(self, *_):
+        if not hasattr(self, "outputNameTypeField") or not hasattr(self.outputNameTypeField, "sequenceSuffixLabel"):
+            return
+
+        digits = self.OutputSequenceFrameDigits()
+        self.outputNameTypeField.sequenceSuffixLabel.setText(f"_{'0' * digits}.")
 
     def SetPreviewFrameCount(self, frameCount):
         self.previewFrameCount = "range" if str(frameCount).lower() == "range" else int(frameCount)
@@ -2359,11 +2537,22 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
     def UpdateBlendControlsEnabled(self, *_):
         self.decay.setEnabled((not self.runActive) and self.RenderPath() == 0 and self.blendMode.currentData() is not None)
+        pairKernelEnabled = (not self.runActive) and self.RenderPath() == 1 and self.pairBlurSpinBox.value() > 0
+        self.pairBlurKernel.setEnabled(pairKernelEnabled)
+        self.pairKernelLabel.setEnabled(pairKernelEnabled)
         if hasattr(self, "blendScaleField"):
             self.blendScaleField.setEnabled(not self.runActive)
         if hasattr(self, "blendOffsetField"):
             self.blendOffsetField.setEnabled(not self.runActive)
         self.UpdateBlendResetButtons()
+
+    def RenderPathClicked(self, *_):
+        if hasattr(self, "presetComboBox"):
+            index = self.presetComboBox.currentIndex()
+            data = self.presetComboBox.itemData(index) if index >= 0 else None
+            if isinstance(data, dict) and data.get("kind") in ("builtin", "user"):
+                self.ClearLoadedPreset()
+        self.MarkProjectDirty(section = "Blend")
 
     def UpdateTransferOverrideControls(self, *_):
         accessible = not self.runActive
@@ -2461,6 +2650,53 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.UpdateViewportInfoVisibility()
         self.UpdateViewportFooterControls()
         self.UpdatePreviewOptionsEnabled()
+
+    def HandleTabShortcut(self, event):
+        modifiers = event.modifiers() & ~QtCore.Qt.KeyboardModifier.KeypadModifier
+        if modifiers != QtCore.Qt.KeyboardModifier.NoModifier:
+            return False
+
+        keyToAction = {
+            QtCore.Qt.Key.Key_1: lambda: self.SetViewportTab(0),
+            QtCore.Qt.Key.Key_2: lambda: self.SetViewportTab(1),
+            QtCore.Qt.Key.Key_3: lambda: self.SetViewportTab(2),
+            QtCore.Qt.Key.Key_4: lambda: self.SetSidebarTab(0),
+            QtCore.Qt.Key.Key_5: lambda: self.SetSidebarTab(1),
+            QtCore.Qt.Key.Key_6: lambda: self.SetSidebarTab(2),
+        }
+        action = keyToAction.get(event.key())
+        if action is None or self.TabShortcutShouldYieldToFocusedWidget():
+            return False
+
+        action()
+        event.accept()
+        return True
+
+    def TabShortcutShouldYieldToFocusedWidget(self):
+        widget = QtWidgets.QApplication.focusWidget()
+        while widget is not None:
+            if isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit, QtWidgets.QAbstractSpinBox)):
+                return True
+            if isinstance(widget, QtWidgets.QComboBox) and widget.isEditable():
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def SetViewportTab(self, index):
+        if not hasattr(self, "viewportTabs"):
+            return
+
+        index = int(index)
+        if 0 <= index < self.viewportTabs.count():
+            self.viewportTabs.setCurrentIndex(index)
+
+    def SetSidebarTab(self, index):
+        if not hasattr(self, "sidebarTabs"):
+            return
+
+        index = int(index)
+        if 0 <= index < self.sidebarTabs.count():
+            self.sidebarTabs.setCurrentIndex(index)
 
     def UpdateInputSyncForViewportTab(self):
         if not hasattr(self, "syncInputSelectionButton") or not hasattr(self, "viewportTabs"):
@@ -2875,6 +3111,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         fileType = self._CleanFileType(self.outputFileType.currentText())
         pageIndex = self.outputOptionsPages.get(fileType, self.outputOptionsPages.get("bmp", 0))
         self.outputOptionsStack.setCurrentIndex(pageIndex)
+        if hasattr(self, "outputOptionsButton"):
+            hasOptions = fileType != "bmp"
+            self.outputOptionsButton.setEnabled(hasOptions)
+            self.outputOptionsButton.setToolTip(
+                "File export options" if hasOptions else "BMP has no export options"
+            )
 
     def PreviewSettingsAccessible(self):
         pausedRun = (
@@ -2971,6 +3213,27 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.MarkProjectDirty()
         if self.InputSelectionSyncEnabled():
             self.InputFileSelectionChanged()
+
+    def SortInputFileListNumerically(self):
+        if not self.inputFileEntries:
+            return
+
+        self.inputFileEntries.sort(
+            key = lambda entry: (
+                self.NaturalFilenameSortKey(os.path.basename(entry["filename"])),
+                os.path.normcase(entry["filename"]),
+            ),
+        )
+        self.RefreshInputFileState()
+        self.MarkProjectDirty()
+        if self.InputSelectionSyncEnabled():
+            self.InputFileSelectionChanged()
+
+    def NaturalFilenameSortKey(self, filename):
+        return tuple(
+            (0, int(part)) if part.isdigit() else (1, part.casefold())
+            for part in re.split(r"(\d+)", filename)
+        )
 
     def AdjustTrimForReorderedInputFiles(self, oldEntries, oldRangeStart, oldRangeStop):
         if not hasattr(self, "rangeField") or not oldEntries:
@@ -3104,6 +3367,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         canMove = hasSelection and not self.InputSelectionSyncChecked() and not self.runActive
         if hasattr(self, "sortInputFilesButton"):
             self.sortInputFilesButton.setEnabled(hasFiles and not self.runActive)
+        if hasattr(self, "sortInputFilesNumericButton"):
+            self.sortInputFilesNumericButton.setEnabled(hasFiles and not self.runActive)
         if hasattr(self, "reverseInput"):
             self.reverseInput.setEnabled(hasFiles and not self.runActive)
         self.moveInputFileUpButton.setEnabled(canMove and selectedRows[0] > 0)
@@ -3113,6 +3378,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.markInputInButton.setEnabled(singleSelection and not self.runActive)
         if hasattr(self, "markInputOutButton"):
             self.markInputOutButton.setEnabled(singleSelection and not self.runActive)
+        if hasattr(self, "clearInputRangeButton"):
+            self.clearInputRangeButton.setEnabled(self.TrimRangeIsActive() and not self.runActive)
         if hasattr(self, "removeAllInputFilesButton"):
             self.removeAllInputFilesButton.setEnabled(hasFiles and not self.runActive)
 
@@ -3138,17 +3405,18 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.inputFileEntries.append({
                 "id": entryId,
                 "filename": os.path.normpath(filename),
+                "transferOverrideEnabled": False,
+                "transferFunction": "sRGB / Display P3",
             })
             addedEntryIds.append(entryId)
             self.nextInputEntryId += 1
+            self.RefreshInputEntryTransferWarning(entryId, filename, refreshList = False)
         self.SyncInputPreviewFilenames()
         if hasattr(self, "rangeField"):
             self.rangeField.SetMaximum(
                 len(self.inputPreviewFilenames),
                 useFullRange = wasFullRange,
             )
-        self.RefreshInputDimensionWarnings(refreshList = False)
-        self.RefreshInputTransferWarnings(refreshList = False)
         if startedUndoTransaction:
             self.EndUndoTransaction()
         elif addedEntryIds:
@@ -3307,9 +3575,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             if isinstance(item, dict):
                 filename = str(item.get("path", "")).strip()
                 enabled = bool(item.get("enabled", True))
+                transferOverrideEnabled = bool(item.get("transferOverrideEnabled", False))
+                transferFunction = str(item.get("transferFunction", "sRGB / Display P3"))
             else:
                 filename = str(item).strip()
                 enabled = True
+                transferOverrideEnabled = False
+                transferFunction = "sRGB / Display P3"
             if not filename:
                 continue
 
@@ -3326,6 +3598,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.inputFileEntries.append({
                 "id": entryId,
                 "filename": filename,
+                "transferOverrideEnabled": transferOverrideEnabled,
+                "transferFunction": transferFunction,
             })
             if not enabled:
                 self.disabledInputFilenames.add(entryId)
@@ -3342,10 +3616,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         self.SyncInputPreviewFilenames()
         self.inputDimensionCache = newDimensionCache
+        if self.blendInLinear.isChecked():
+            for entry in self.inputFileEntries:
+                self.RefreshInputEntryTransferWarning(entry["id"], refreshList = False)
+        elif self.transferWarningInputFilenames:
+            self.transferWarningInputFilenames = set()
         if hasattr(self, "rangeField"):
             self.rangeField.SetMaximum(len(self.inputPreviewFilenames), useFullRange = True)
-        self.RefreshInputDimensionWarnings(refreshList = False)
-        self.RefreshInputTransferWarnings(refreshList = False)
         if refresh:
             self.RefreshInputFileState(preserveScrubberView = True)
 
@@ -3466,18 +3743,53 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.transferWarningInputFilenames.discard(entryId)
         return hadWarning != warning
 
+    def CachedInputMetadata(self, filename):
+        filename = os.path.normpath(filename or "")
+        if not filename:
+            return {}
+        cached = self.inputMetadataCache.get(filename)
+        if cached is not None:
+            return cached
+        metadata = ReadImageMetadata(filename)
+        self.inputMetadataCache[filename] = metadata
+        return metadata
+
+    def RefreshInputEntryTransferWarning(self, entryId, filename = None, metadata = None, refreshList = True):
+        entry = self.InputEntryById(entryId)
+        if not entry:
+            return False
+
+        filename = filename or entry.get("filename")
+        if not self.blendInLinear.isChecked():
+            changed = self.SetInputEntryTransferWarning(entryId, False)
+        elif entryId in self.missingInputFilenames or not filename or not os.path.isfile(filename):
+            changed = self.SetInputEntryTransferWarning(entryId, False)
+        elif self.InputEntryTransferOverride(entry):
+            changed = self.SetInputEntryTransferWarning(entryId, False)
+        else:
+            try:
+                metadata = metadata or self.CachedInputMetadata(filename)
+                warning = IsUnknownTransferFunction(metadata.get("transfer"))
+            except (OSError, FileNotFoundError):
+                warning = False
+            changed = self.SetInputEntryTransferWarning(entryId, warning)
+
+        if changed and refreshList:
+            self.RefreshInputFileList()
+        return changed
+
     def RefreshInputTransferWarnings(self, *_args, refreshList = True):
+        if not self.blendInLinear.isChecked():
+            changed = bool(self.transferWarningInputFilenames)
+            self.transferWarningInputFilenames = set()
+            if changed and refreshList:
+                self.RefreshInputFileList()
+            return
+
         changed = False
         for entry in self.inputFileEntries:
             entryId = entry["id"]
-            filename = entry["filename"]
-            if entryId in self.missingInputFilenames or not os.path.isfile(filename):
-                changed = self.SetInputEntryTransferWarning(entryId, False) or changed
-                continue
-
-            metadata = ReadImageMetadata(filename)
-            warning = IsUnknownTransferFunction(metadata.get("transfer"))
-            changed = self.SetInputEntryTransferWarning(entryId, warning) or changed
+            changed = self.RefreshInputEntryTransferWarning(entryId, refreshList = False) or changed
 
         if changed and refreshList:
             self.RefreshInputFileList()
@@ -3672,7 +3984,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         return True
 
-    def RefreshInputFileState(self, preserveScrubberView = False):
+    def RefreshInputFileState(self, preserveScrubberView = False, refreshWarnings = False):
         scrubberSnapshot = self.ScrubberViewSnapshot() if preserveScrubberView else None
         preserveSelectionEntryIds = (
             set(self.pendingInputSelectionEntryIds)
@@ -3682,8 +3994,9 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.SyncInputPreviewFilenames()
         if hasattr(self, "rangeField"):
             self.rangeField.SetMaximum(len(self.inputPreviewFilenames))
-        self.RefreshInputDimensionWarnings(refreshList = False)
-        self.RefreshInputTransferWarnings(refreshList = False)
+        if refreshWarnings:
+            self.RefreshInputDimensionWarnings(refreshList = False)
+            self.RefreshInputTransferWarnings(refreshList = False)
         self.RefreshInputFileList()
         self.RefreshInputStatusLabel()
         self.RefreshInputPreviewMetadata()
@@ -3705,6 +4018,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.UpdateFrameScrubberHighlight()
         if preserveSelectionEntryIds:
             self.RestoreInputFileSelection(preserveSelectionEntryIds)
+        self.UpdateOutputSequenceSuffixLabel()
+        self.UpdateRunButtons()
 
     def ScrubberViewSnapshot(self):
         if not hasattr(self, "frameScrubber"):
@@ -3921,17 +4236,21 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         return True
 
     def RemoveSelectedInputFilesFromList(self):
+        selectedIds = {
+            entryId
+            for _filename, entryId in self.SelectedInputFileListEntries()
+            if entryId is not None
+        }
+        self.RemoveInputFilesFromListByIds(selectedIds)
+
+    def RemoveInputFilesFromListByIds(self, selectedIds):
         selection = self.inputFileList.selectionModel()
         selectedRows = sorted(index.row() for index in selection.selectedRows()) if selection else []
         if selectedRows:
             self.pendingInputFileListRow = min(selectedRows)
             self.pendingInputFileListScroll = self.inputFileList.verticalScrollBar().value()
 
-        selectedIds = {
-            entryId
-            for _filename, entryId in self.SelectedInputFileListEntries()
-            if entryId is not None
-        }
+        selectedIds = set(selectedIds)
         if not selectedIds:
             self.ClearPendingInputRemoveHighlight()
             return
@@ -4001,8 +4320,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         self.BeginUndoTransaction()
         try:
-            self.inputFileList.selectAll()
-            self.RemoveSelectedInputFilesFromList()
+            self.RemoveInputFilesFromListByIds(allEntryIds)
         finally:
             self.EndUndoTransaction()
 
@@ -4033,12 +4351,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         singleSelection = len(selectedEntries) == 1
         imageNoun = "image" if singleSelection else "images"
         if singleSelection:
+            if not self.InputSelectionSyncChecked():
+                self.AddFileListMenuButton(menu, "crop_3_2_24dp_E3E3E3.svg", "View", self.ViewSelectedInputFile, shortcutText = "V")
+                menu.addSeparator()
             self.AddFileListMenuButton(menu, SplitAssetIcon("data_array_24dp_E3E3E3.svg", "left"), "Mark In", lambda: self.MarkRangeFromFileList("in"))
             self.AddFileListMenuButton(menu, SplitAssetIcon("data_array_24dp_E3E3E3.svg", "right"), "Mark Out", lambda: self.MarkRangeFromFileList("out"))
+            if self.TrimRangeIsActive():
+                self.AddFileListMenuButton(menu, "refresh_24dp_E3E3E3.svg", "Clear Range", self.ResetTrimRange, shortcutText = "Alt+X")
             menu.addSeparator()
-            if not self.InputSelectionSyncChecked():
-                self.AddFileListMenuButton(menu, "crop_3_2_24dp_E3E3E3.svg", "View", self.ViewSelectedInputFile)
-                menu.addSeparator()
         self.AddFileListMenuButton(menu, "visibility_off_24dp_E3E3E3.svg", f"Disable {imageNoun}", lambda: self.SetSelectedInputFilesEnabled(False), shortcutText = "H")
         self.AddFileListMenuButton(menu, "visibility_24dp_E3E3E3.svg", f"Enable {imageNoun}", lambda: self.SetSelectedInputFilesEnabled(True), shortcutText = "U")
         menu.addSeparator()
@@ -4050,6 +4370,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             dangerOnPress = True,
             shortcutText = "Delete",
         )
+        if self.blendInLinear.isChecked():
+            menu.addSeparator()
+            self.AddViewportSubmenuButton(
+                menu,
+                "gamma_24dp_E3E3E3.svg",
+                "Transfer Function",
+                lambda childMenu: self.PopulateFileListGammaMenu(childMenu, selectedEntries, menu),
+            )
         if singleSelection:
             menu.addSeparator()
             self.AddFileListMenuButton(menu, "folder_open_24dp_E3E3E3.svg", "Open containing folder", self.OpenSelectedInputContainingFolder)
@@ -4058,12 +4386,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.ClearPendingInputRemoveHighlight()
         self.fileListContextEntryId = None
 
-    def AddFileListMenuButton(self, menu, icon, text, callback, dangerOnPress = False, shortcutText = ""):
+    def AddFileListMenuButton(self, menu, icon, text, callback, dangerOnPress = False, shortcutText = "", enabled = True):
         action = QtWidgets.QWidgetAction(menu)
         button = QtWidgets.QPushButton()
         button.setObjectName("viewportMenuItem")
         button.setFlat(True)
-        button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        button.setEnabled(enabled)
+        button.setProperty("softDisabled", not enabled)
+        button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor if enabled else QtCore.Qt.CursorShape.ArrowCursor)
         button.setMinimumWidth(250)
         row = QtWidgets.QHBoxLayout(button)
         row.setContentsMargins(12, 0, 14, 0)
@@ -4073,15 +4403,27 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         iconLabel = QtWidgets.QLabel()
         iconLabel.setObjectName("menuIconLabel")
         iconLabel.setFixedSize(18, 18)
-        iconLabel.setPixmap(menuIcon.pixmap(18, 18))
+        iconPixmap = menuIcon.pixmap(18, 18)
+        if not enabled:
+            tinted = QtGui.QPixmap(iconPixmap.size())
+            tinted.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(tinted)
+            painter.drawPixmap(0, 0, iconPixmap)
+            painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(tinted.rect(), ThemeQColor("TEXT_DISABLED"))
+            painter.end()
+            iconPixmap = tinted
+        iconLabel.setPixmap(iconPixmap)
         iconLabel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         textLabel = QtWidgets.QLabel(text)
         textLabel.setObjectName("menuTextLabel")
+        textLabel.setProperty("softDisabled", not enabled)
         textLabel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         shortcutLabel = QtWidgets.QLabel(shortcutText)
         shortcutLabel.setObjectName("menuShortcutLabel")
+        shortcutLabel.setProperty("softDisabled", not enabled)
         shortcutLabel.setMinimumWidth(24)
         shortcutLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         shortcutLabel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -4090,7 +4432,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         row.addWidget(textLabel, 0)
         row.addStretch(1)
         row.addWidget(shortcutLabel, 0)
-        if dangerOnPress:
+        if dangerOnPress and enabled:
             button.pressed.connect(self.MarkSelectedInputFilesPendingRemove)
             button.released.connect(lambda button = button: self.ClearPendingInputRemoveIfButtonCancelled(button))
 
@@ -4098,10 +4440,178 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             callback()
             menu.hide()
 
-        button.clicked.connect(Trigger)
+        if enabled:
+            button.clicked.connect(Trigger)
         action.setDefaultWidget(button)
         menu.addAction(action)
         return button
+
+    def EntryDetectedTransferFunction(self, entry):
+        if not entry:
+            return "sRGB / Display P3", True
+
+        try:
+            metadata = self.CachedInputMetadata(entry["filename"])
+            transfer = metadata.get("transfer", "Unknown")
+        except (OSError, FileNotFoundError):
+            transfer = "Unknown"
+
+        if IsUnknownTransferFunction(transfer):
+            return "sRGB / Display P3", True
+        return str(transfer), False
+
+    def EntryGammaState(self, entry):
+        override = self.InputEntryTransferOverride(entry)
+        if override:
+            return override, True, False
+
+        detectedTransfer, assumed = self.EntryDetectedTransferFunction(entry)
+        return detectedTransfer, False, assumed
+
+    def SelectedGammaState(self, entries):
+        states = []
+        for _filename, entryId in entries:
+            entry = self.InputEntryById(entryId)
+            if entry:
+                states.append(self.EntryGammaState(entry))
+        if not states:
+            return None
+        firstState = states[0]
+        return firstState if all(state == firstState for state in states) else None
+
+    def SelectedGammaAutoState(self, entries):
+        states = []
+        for _filename, entryId in entries:
+            entry = self.InputEntryById(entryId)
+            if entry:
+                states.append(self.EntryDetectedTransferFunction(entry))
+        if not states:
+            return None
+        firstState = states[0]
+        return firstState if all(state == firstState for state in states) else None
+
+    def SelectedGammaAllAuto(self, entries):
+        states = []
+        for _filename, entryId in entries:
+            entry = self.InputEntryById(entryId)
+            if entry:
+                states.append(not bool(entry.get("transferOverrideEnabled", False)))
+        return bool(states) and all(states)
+
+    def PopulateFileListGammaMenu(self, menu, selectedEntries, rootMenu):
+        menu.setMinimumWidth(310)
+        selectedEntries = list(selectedEntries or [])
+        largeSelection = len(selectedEntries) > 100
+        if largeSelection:
+            overrideStates = []
+            for _filename, entryId in selectedEntries:
+                entry = self.InputEntryById(entryId)
+                if entry and entry.get("transferOverrideEnabled", False):
+                    overrideStates.append((entry.get("transferFunction", "sRGB / Display P3"), True, False))
+                else:
+                    overrideStates.append(None)
+            firstOverrideState = overrideStates[0] if overrideStates else None
+            selectedState = (
+                firstOverrideState
+                if firstOverrideState is not None and all(state == firstOverrideState for state in overrideStates) else
+                None
+            )
+            detectedAutoState = None
+        else:
+            selectedState = self.SelectedGammaState(selectedEntries)
+            detectedAutoState = self.SelectedGammaAutoState(selectedEntries)
+        selectedTransfer = selectedState[0] if selectedState else None
+        selectedIsOverride = selectedState[1] if selectedState else None
+        allAuto = self.SelectedGammaAllAuto(selectedEntries)
+
+        self.AddViewportMenuButton(
+            menu,
+            "check_24dp_E3E3E3.svg" if allAuto else "",
+            "Auto",
+            self.SetSelectedInputFilesTransferFunctionAuto,
+            closeMenu = rootMenu,
+        )
+        menu.addSeparator()
+
+        for transferName in TransferFunctionNames():
+            suffix = ""
+            if detectedAutoState and transferName == detectedAutoState[0]:
+                suffix = " (assumed)" if detectedAutoState[1] else " (auto)"
+
+            checked = (
+                selectedTransfer == transferName
+                and (
+                    bool(selectedIsOverride)
+                    or (allAuto and detectedAutoState and not detectedAutoState[1])
+                )
+            )
+            iconName = "check_24dp_E3E3E3.svg" if checked else ""
+            self.AddViewportMenuButton(
+                menu,
+                iconName,
+                f"{transferName}{suffix}",
+                lambda transferName = transferName: self.SetSelectedInputFilesTransferFunction(transferName),
+                closeMenu = rootMenu,
+            )
+
+    def SetSelectedInputFilesTransferFunctionAuto(self):
+        self.SetSelectedInputFilesTransferFunction(None)
+
+    def SetSelectedInputFilesTransferFunction(self, transferName):
+        entries = self.SelectedInputFileListEntries()
+        if not entries:
+            return
+
+        transferName = str(transferName) if transferName else None
+        startedUndoTransaction = False
+        if not self.suppressProjectDirty and self.pendingUndoTransactionSnapshot is None:
+            self.BeginUndoTransaction()
+            startedUndoTransaction = True
+
+        changed = False
+        selectedIds = set()
+        singleEntryEdit = len(entries) == 1
+        entryById = {entry["id"]: entry for entry in self.inputFileEntries}
+        try:
+            for _filename, entryId in entries:
+                entry = entryById.get(entryId)
+                if not entry:
+                    continue
+
+                selectedIds.add(entryId)
+                oldEnabled = bool(entry.get("transferOverrideEnabled", False))
+                oldTransfer = entry.get("transferFunction", "sRGB / Display P3")
+
+                if transferName is None:
+                    detectedTransfer, _detectedAssumed = self.EntryDetectedTransferFunction(entry)
+                    entry["transferOverrideEnabled"] = False
+                    entry["transferFunction"] = detectedTransfer
+                else:
+                    useAuto = False
+                    if singleEntryEdit:
+                        detectedTransfer, detectedAssumed = self.EntryDetectedTransferFunction(entry)
+                        useAuto = transferName == detectedTransfer and not detectedAssumed
+                    entry["transferOverrideEnabled"] = not useAuto
+                    entry["transferFunction"] = detectedTransfer if useAuto else transferName
+
+                if oldEnabled != entry["transferOverrideEnabled"] or oldTransfer != entry["transferFunction"]:
+                    changed = True
+        finally:
+            if startedUndoTransaction:
+                self.EndUndoTransaction()
+
+        if changed:
+            if transferName is None:
+                for entryId in selectedIds:
+                    self.RefreshInputEntryTransferWarning(entryId, refreshList = False)
+            else:
+                self.transferWarningInputFilenames.difference_update(selectedIds)
+            self.RefreshInputPreviewMetadata()
+            self.inputFileModel.SetTransferWarnings(self.transferWarningInputFilenames, selectedIds)
+            if startedUndoTransaction:
+                self.SetProjectDirty(True)
+            else:
+                self.MarkProjectDirty(section = "Images")
 
     def MarkSelectedInputFilesPendingRemove(self):
         if not hasattr(self, "inputFileModel"):
@@ -4199,6 +4709,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.viewportTabs.setCurrentIndex(0)
         self.LoadInputPreview(entry["filename"], entryId, preserveScrubberView = True)
 
+    def ViewSelectedInputFileFromShortcut(self):
+        if self.runActive or self.InputSelectionSyncChecked():
+            return
+
+        self.ViewSelectedInputFile()
+
     def ClearManualInputViewport(self):
         self.manualInputViewportEntryId = None
 
@@ -4266,23 +4782,18 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         except OSError:
             fileSize = "Unknown"
 
+        warnUnknownMetadata = self.blendInLinear.isChecked()
         transferText = metadata.get("transfer", "Unknown")
         transferObjectName = ""
-        if IsUnknownTransferFunction(transferText):
+        if warnUnknownMetadata and IsUnknownTransferFunction(transferText):
             transferText = f'<span style="color: {ThemeColor("WARNING")}">{html.escape(str(transferText))}</span>'
             transferObjectName = "richText"
-        colorSpaceText = metadata.get("colorSpace", "Unknown")
-        colorSpaceObjectName = ""
-        if IsUnknownColorSpace(colorSpaceText):
-            colorSpaceText = f'<span style="color: {ThemeColor("WARNING")}">{html.escape(str(colorSpaceText))}</span>'
-            colorSpaceObjectName = "richText"
-
         rows = [
             ("Path", os.path.normpath(filename), ""),
             ("File type", os.path.splitext(filename)[1].lstrip(".").upper() or "Unknown", ""),
             ("File size", fileSize, ""),
             ("Dimensions", metadata.get("dimensions") or (f"{dimensions[0]}x{dimensions[1]}" if dimensions else "Unknown"), ""),
-            ("Color space", colorSpaceText, colorSpaceObjectName),
+            ("Color space", metadata.get("colorSpace", "Unknown"), ""),
             ("Transfer function", transferText, transferObjectName),
         ]
 
@@ -4351,7 +4862,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         targetResolution = self.EffectiveOutputResolution()
         willRescale = bool(dimensions and targetResolution and dimensions != targetResolution)
         self.SetInputEntryRescaleWarning(entryId, willRescale)
-        self.SetInputEntryTransferWarning(entryId, exists and IsUnknownTransferFunction(metadata.get("transfer")))
+        warnUnknownTransfer = (
+            exists
+            and self.blendInLinear.isChecked()
+            and not self.InputEntryTransferOverride(entry)
+            and IsUnknownTransferFunction(metadata.get("transfer"))
+        )
+        self.SetInputEntryTransferWarning(entryId, warnUnknownTransfer)
 
         activeFrameNumber = None
         activePosition = None
@@ -4380,24 +4897,27 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 f'{html.escape(dimensionsText)} '
                 f'<span style="color: {ThemeColor("WARNING")}">(Image will be scaled to export dimensions)</span>'
             )
-        transferText = metadata.get("transfer", "Unknown")
+        entryTransferOverride = self.InputEntryTransferOverride(entry)
+        transferText = entryTransferOverride or metadata.get("transfer", "Unknown")
         transferObjectName = ""
-        if IsUnknownTransferFunction(transferText):
+        if entryTransferOverride:
+            transferText = (
+                f'{html.escape(str(entryTransferOverride))} '
+                f'<span style="color: {ThemeColor("WARNING")}">(user override)</span>'
+            )
+            transferObjectName = "richText"
+        elif warnUnknownTransfer:
             transferText = f'<span style="color: {ThemeColor("WARNING")}">{html.escape(str(transferText))}</span>'
             transferObjectName = "richText"
-        colorSpaceText = metadata.get("colorSpace", "Unknown")
-        colorSpaceObjectName = ""
-        if IsUnknownColorSpace(colorSpaceText):
-            colorSpaceText = f'<span style="color: {ThemeColor("WARNING")}">{html.escape(str(colorSpaceText))}</span>'
-            colorSpaceObjectName = "richText"
-
+        frameDigits = max(4, len(str(max(activeFrameNumbers.values()))) if activeFrameNumbers else 4)
+        renderFrameText = ("-" * frameDigits) if activeFrameNumber is None else f"{activeFrameNumber:0{frameDigits}d}"
         rows = [
             ("Path", pathText, "errorLabel" if not exists else "", "errorLabel" if not exists else ""),
-            ("Render frame", "----" if activeFrameNumber is None else f"{activeFrameNumber:04d}"),
+            ("Render frame", renderFrameText),
             ("File type", os.path.splitext(filename)[1].lstrip(".").upper() or "Unknown"),
             ("File size", fileSize or "Unknown"),
             ("Dimensions", dimensionsText, "richText" if willRescale else ""),
-            ("Color space", colorSpaceText, colorSpaceObjectName),
+            ("Color space", metadata.get("colorSpace", "Unknown")),
             ("Transfer function", transferText, transferObjectName),
         ]
 
@@ -4536,6 +5056,19 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             if entryId not in self.disabledInputFilenames
         ]
 
+    def EnabledInputEntries(self):
+        entryById = {entry["id"]: entry for entry in self.inputFileEntries}
+        return [
+            entryById[entryId]
+            for _filename, _sourceIndex, entryId in self.DisplayInputFileEntries()
+            if entryId not in self.disabledInputFilenames and entryId in entryById
+        ]
+
+    def InputEntryTransferOverride(self, entry):
+        if not entry or not entry.get("transferOverrideEnabled", False):
+            return None
+        return entry.get("transferFunction") or "sRGB / Display P3"
+
     def EnabledInputFilenamesWithSourceIndices(self):
         result = []
         for filename, sourceIndex, entryId in self.DisplayInputFileEntries():
@@ -4566,6 +5099,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         activeFrameNumbers, manuallyEnabled = self.InputReadPlan()
         rangeStart, rangeStop = self.InputTrimRange()
         digits = max(4, len(str(max(0, len(activeFrameNumbers) - 1))))
+        inactivePrefix = "-" * digits
         currentPreviewEntryId = None if self.InputSelectionSyncChecked() else self.CurrentInputScrubberEntryId()
         try:
             rows = []
@@ -4573,7 +5107,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             for index, (filename, sourceIndex, entryId) in enumerate(entries):
                 inTrimRange = rangeStart <= sourceIndex < rangeStop
                 frameNumber = activeFrameNumbers.get(index)
-                prefix = f"{frameNumber:0{digits}d}" if inTrimRange and frameNumber is not None else "----"
+                prefix = f"{frameNumber:0{digits}d}" if inTrimRange and frameNumber is not None else inactivePrefix
                 isActive = frameNumber is not None
                 isManuallyEnabled = index in manuallyEnabled
                 isMissing = entryId in self.missingInputFilenames
@@ -4653,7 +5187,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
     def CurrentInputScrubberEntryId(self):
         if not hasattr(self, "frameScrubber"):
             return None
-        entryIds = self.InputReadEntryIds()
+        entryIds = self.InputScrubberEntryIds()
         if not entryIds:
             return None
         index = max(0, min(int(self.frameScrubber.value), len(entryIds) - 1))
@@ -4753,11 +5287,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         if filename:
             self.CheckInputEntryFileExists(entryId, filename)
+            self.RefreshInputEntryTransferWarning(entryId, filename)
 
         if not self.InputSelectionSyncEnabled():
             return
 
-        for index, scrubberEntryId in enumerate(self.InputReadEntryIds()):
+        for index, scrubberEntryId in enumerate(self.InputScrubberEntryIds()):
             if scrubberEntryId == entryId:
                 self.frameScrubber.SetValue(index, emit = True)
                 return
@@ -4791,17 +5326,33 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         rangeStop = max(rangeStart, min(rangeStop, frameCount))
         return rangeStart, rangeStop
 
+    def TrimRangeIsActive(self):
+        frameCount = len(self.inputPreviewFilenames)
+        if frameCount <= 0:
+            return False
+
+        rangeStart, rangeStop = self.InputTrimRange()
+        return rangeStart > 0 or rangeStop < frameCount
+
     def InputReadSequence(self):
+        scrubberSequence, manuallyEnabled = self.InputScrubberSequence()
+        if not scrubberSequence:
+            return [], manuallyEnabled
+
+        rangeStart, rangeStop = self.InputTrimRange()
+        entries = self.DisplayInputFileEntries()
+        return [
+            (position, enabledIndex)
+            for position, enabledIndex in scrubberSequence
+            if rangeStart <= entries[position][1] < rangeStop
+        ], manuallyEnabled
+
+    def InputScrubberSequence(self):
         if not self.inputPreviewFilenames:
             return [], set()
 
-        rangeStart, rangeStop = self.InputTrimRange()
-        stopAfter = max(0, rangeStop - rangeStart)
-        if stopAfter <= 0:
-            return [], set()
-
         entries = self.DisplayInputFileEntries()
-        eligiblePositions = []
+        scrubberPositions = []
         manuallyEnabled = set()
         enabledDisplayIndex = 0
         for position, (filename, sourceIndex, entryId) in enumerate(entries):
@@ -4810,12 +5361,11 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 continue
 
             manuallyEnabled.add(position)
-            if rangeStart <= sourceIndex < rangeStop:
-                eligiblePositions.append((position, enabledDisplayIndex))
+            scrubberPositions.append((position, enabledDisplayIndex))
             enabledDisplayIndex += 1
 
         skip = max(1, self.skipInput.value())
-        return eligiblePositions[::skip], manuallyEnabled
+        return scrubberPositions[::skip], manuallyEnabled
 
     def InputReadPlan(self):
         sequence, manuallyEnabled = self.InputReadSequence()
@@ -4828,6 +5378,30 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
     def InputReadIndices(self):
         sequence, _manuallyEnabled = self.InputReadSequence()
         return [enabledIndex for _position, enabledIndex in sequence]
+
+    def InputScrubberFilenames(self):
+        filenames = self.EnabledInputFilenames()
+        return [
+            filenames[enabledIndex]
+            for _position, enabledIndex in self.InputScrubberSequence()[0]
+            if 0 <= enabledIndex < len(filenames)
+        ]
+
+    def InputScrubberEntryIds(self):
+        entryIds = self.EnabledInputEntryIds()
+        return [
+            entryIds[enabledIndex]
+            for _position, enabledIndex in self.InputScrubberSequence()[0]
+            if 0 <= enabledIndex < len(entryIds)
+        ]
+
+    def InputScrubberTransferOverrides(self):
+        entries = self.EnabledInputEntries()
+        return [
+            self.InputEntryTransferOverride(entries[enabledIndex])
+            for _position, enabledIndex in self.InputScrubberSequence()[0]
+            if 0 <= enabledIndex < len(entries)
+        ]
 
     def InputReadFilenames(self):
         filenames = self.EnabledInputFilenames()
@@ -4845,14 +5419,64 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             if 0 <= enabledIndex < len(entryIds)
         ]
 
+    def InputReadTransferOverrides(self):
+        entries = self.EnabledInputEntries()
+        return [
+            self.InputEntryTransferOverride(entries[enabledIndex])
+            for _position, enabledIndex in self.InputReadSequence()[0]
+            if 0 <= enabledIndex < len(entries)
+        ]
+
+    def InputReadScrubberIndices(self):
+        scrubberSequence, _manuallyEnabled = self.InputScrubberSequence()
+        if not scrubberSequence:
+            return []
+
+        entries = self.DisplayInputFileEntries()
+        rangeStart, rangeStop = self.InputTrimRange()
+        return [
+            scrubberIndex
+            for scrubberIndex, (position, _enabledIndex) in enumerate(scrubberSequence)
+            if rangeStart <= entries[position][1] < rangeStop
+        ]
+
     def InputReadIndicesFromScrubber(self, frameCount, clampToTrim = False):
-        sequence, _manuallyEnabled = self.InputReadSequence()
+        scrubberSequence, _manuallyEnabled = self.InputScrubberSequence()
+        entries = self.DisplayInputFileEntries()
+        rangeStart, rangeStop = self.InputTrimRange()
         startPosition = self.InputScrubberStartIndex()
-        if clampToTrim and sequence and startPosition >= len(sequence):
-            startPosition = 0
+        if clampToTrim and scrubberSequence:
+            trimPositions = [
+                scrubberIndex
+                for scrubberIndex, (position, _enabledIndex) in enumerate(scrubberSequence)
+                if rangeStart <= entries[position][1] < rangeStop
+            ]
+            if trimPositions and startPosition not in trimPositions:
+                startPosition = trimPositions[0]
         indices = [
             enabledIndex
-            for _position, enabledIndex in sequence[startPosition:]
+            for scrubberIndex, (position, enabledIndex) in enumerate(scrubberSequence)
+            if scrubberIndex >= startPosition and rangeStart <= entries[position][1] < rangeStop
+        ]
+        return indices[:max(1, int(frameCount))]
+
+    def InputReadScrubberIndicesFromScrubber(self, frameCount, clampToTrim = False):
+        scrubberSequence, _manuallyEnabled = self.InputScrubberSequence()
+        entries = self.DisplayInputFileEntries()
+        rangeStart, rangeStop = self.InputTrimRange()
+        startPosition = self.InputScrubberStartIndex()
+        if clampToTrim and scrubberSequence:
+            trimPositions = [
+                scrubberIndex
+                for scrubberIndex, (position, _enabledIndex) in enumerate(scrubberSequence)
+                if rangeStart <= entries[position][1] < rangeStop
+            ]
+            if trimPositions and startPosition not in trimPositions:
+                startPosition = trimPositions[0]
+        indices = [
+            scrubberIndex
+            for scrubberIndex, (position, _enabledIndex) in enumerate(scrubberSequence)
+            if scrubberIndex >= startPosition and rangeStart <= entries[position][1] < rangeStop
         ]
         return indices[:max(1, int(frameCount))]
 
@@ -4870,6 +5494,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             entryIds[index]
             for index in self.InputReadIndicesFromScrubber(frameCount, clampToTrim)
             if 0 <= index < len(entryIds)
+        ]
+
+    def InputReadTransferOverridesFromScrubber(self, frameCount, clampToTrim = False):
+        entries = self.EnabledInputEntries()
+        return [
+            self.InputEntryTransferOverride(entries[index])
+            for index in self.InputReadIndicesFromScrubber(frameCount, clampToTrim)
+            if 0 <= index < len(entries)
         ]
 
     def UpdateInputEmptyAction(self):
@@ -4908,18 +5540,18 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         )
 
     def SetOutputEmptyFramesMessage(self):
-        self.outputViewport.Clear("View rendered exports here")
+        self.outputViewport.Clear("Rendered exports can be viewed here")
 
     def CurrentRangeFilenames(self):
         if not self.inputPreviewFilenames or not hasattr(self, "rangeField"):
             return []
 
-        return self.InputReadFilenames()
+        return self.InputScrubberFilenames()
 
-    def CachedImageDimensions(self, filename):
-        if filename not in self.inputDimensionCache:
+    def CachedImageDimensions(self, filename, readIfMissing = True):
+        if filename not in self.inputDimensionCache and readIfMissing:
             self.inputDimensionCache[filename] = ReadImageDimensions(filename)
-        return self.inputDimensionCache[filename]
+        return self.inputDimensionCache.get(filename)
 
     def CurrentRangeDimensionSummary(self):
         filenames = self.CurrentRangeFilenames()
@@ -4932,7 +5564,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         differingSizes = []
         for filename in filenames[1:]:
-            size = self.CachedImageDimensions(filename)
+            size = self.CachedImageDimensions(filename, readIfMissing = False)
             if size and size != firstSize:
                 differingSizes = [firstSize, size]
                 break
@@ -4943,7 +5575,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         # Keep the first rendered frame's size first; reverse/reordered lists depend on this.
         uniqueSizes = [firstSize]
         for filename in filenames[1:]:
-            size = self.CachedImageDimensions(filename)
+            size = self.CachedImageDimensions(filename, readIfMissing = False)
             if size and size not in uniqueSizes:
                 uniqueSizes.append(size)
         return True, uniqueSizes
@@ -4989,10 +5621,11 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         rangeStart, rangeStop = self.rangeField.Values()
         useRangeStop = self.previewRangeStopWhileDragging
+        entries = self.DisplayInputFileEntries()
         enabledInRange = [
-            (filename, entryId)
-            for filename, sourceIndex, entryId in self.DisplayInputFileEntries()
-            if entryId not in self.disabledInputFilenames and rangeStart <= sourceIndex < rangeStop
+            (entries[position][0], entries[position][2])
+            for position, _enabledIndex in self.InputReadSequence()[0]
+            if 0 <= position < len(entries)
         ]
         if not enabledInRange:
             self.ClearInputPreview(preserveScrubberView = preserveScrubberView)
@@ -5112,10 +5745,27 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             metadata = ReadImageMetadata(filename)
         except (OSError, FileNotFoundError):
             metadata = {"transfer": "Unknown", "colorSpace": "Unknown"}
+        entry = self.InputEntryById(self.currentInputPreviewEntryId)
+        self.RefreshInputEntryTransferWarning(
+            self.currentInputPreviewEntryId,
+            filename,
+            metadata = metadata,
+        )
+        entryTransferOverride = self.InputEntryTransferOverride(entry)
+        warnUnknownTransfer = (
+            self.blendInLinear.isChecked()
+            and not entryTransferOverride
+            and not self.overrideInputTransfer.isChecked()
+            and IsUnknownTransferFunction(metadata.get("transfer"))
+        )
         transferLine = (
+            TransferOverrideLine(entryTransferOverride)
+            if entryTransferOverride else
             TransferOverrideLine(self._TransferFunctionValue(self.inputTransferFunction))
             if self.blendInLinear.isChecked() and self.overrideInputTransfer.isChecked() else
             TransferFunctionLine(metadata["transfer"])
+            if warnUnknownTransfer else
+            f'Transfer Function: {metadata["transfer"]}'
         )
         dimensions = self.CachedImageDimensions(filename)
         if not dimensions and fallbackWidth is not None and fallbackHeight is not None:
@@ -5130,7 +5780,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 ])
         metadataLines = [
             dimensionsLine,
-            ColorSpaceLine(metadata["colorSpace"]),
+            f'Color space: {metadata["colorSpace"]}',
             transferLine,
         ]
         return metadataLines
@@ -5169,13 +5819,16 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             path = os.path.join(directory, f"{outputName}.{outputType}")
             return [path] if os.path.isfile(path) else []
 
-        pattern = re.compile(rf"^{re.escape(outputName)}_\d{{4}}\.{re.escape(outputType)}$", re.IGNORECASE)
+        pattern = re.compile(rf"^{re.escape(outputName)}_(\d{{4,}})\.{re.escape(outputType)}$", re.IGNORECASE)
         filenames = []
         for filename in os.listdir(directory):
             path = os.path.join(directory, filename)
             if os.path.isfile(path) and pattern.match(filename):
                 filenames.append(path)
-        return sorted(filenames)
+        return sorted(
+            filenames,
+            key = lambda path: int(pattern.match(os.path.basename(path)).group(1)),
+        )
 
     def UpdateOutputViewport(self, *_):
         if self.runActive or not hasattr(self, "outputViewport"):
@@ -5220,10 +5873,13 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             return
 
         metadata = ReadImageMetadata(filename)
+        warnUnknownTransfer = self.blendInLinear.isChecked() and IsUnknownTransferFunction(metadata.get("transfer"))
         metadataLines = [
             f"Dimensions: {metadata['dimensions']}" if metadata["dimensions"] else "",
-            ColorSpaceLine(metadata["colorSpace"]),
-            TransferFunctionLine(metadata["transfer"]),
+            f'Color space: {metadata["colorSpace"]}',
+            TransferFunctionLine(metadata["transfer"])
+            if warnUnknownTransfer else
+            f'Transfer Function: {metadata["transfer"]}',
         ]
         self.currentOutputPreviewFile = os.path.abspath(filename)
         self.outputViewport.SetPixmap(QtGui.QPixmap.fromImage(image), os.path.basename(filename), metadataLines)
@@ -5235,7 +5891,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.previewCacheLimitReached = False
         self.currentPreviewCacheIndex = None
         if hasattr(self, "previewViewport"):
-            self.previewViewport.Clear("View generated previews here")
+            self.previewViewport.Clear("Generated previews can be viewed  here")
         if hasattr(self, "viewportTabs") and self.viewportTabs.currentIndex() == 1:
             self.UpdateFrameScrubber()
 
@@ -5331,12 +5987,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         if self.viewportTabs.currentIndex() == 2:
             return self.OutputViewportFilenames()
 
-        return self.InputReadFilenames()
+        return self.InputScrubberFilenames()
 
     def ActiveScrubberInputEntryIds(self):
         if not hasattr(self, "viewportTabs") or self.viewportTabs.currentIndex() != 0:
             return []
-        return self.InputReadEntryIds()
+        return self.InputScrubberEntryIds()
 
     def CurrentScrubberFile(self):
         if not hasattr(self, "viewportTabs"):
@@ -5504,11 +6160,17 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         if rangeStart <= 0 and rangeStop >= frameCount:
             return None
 
-        readFrameCount = len(self.InputReadFilenames())
-        if readFrameCount <= 0:
+        scrubberSequence, _manuallyEnabled = self.InputScrubberSequence()
+        entries = self.DisplayInputFileEntries()
+        trimPositions = [
+            scrubberIndex
+            for scrubberIndex, (position, _enabledIndex) in enumerate(scrubberSequence)
+            if rangeStart <= entries[position][1] < rangeStop
+        ]
+        if not trimPositions:
             return None
 
-        return 0, readFrameCount - 1
+        return trimPositions[0], trimPositions[-1]
 
     def UpdateFrameScrubberHighlight(self):
         if not hasattr(self, "frameScrubber"):
@@ -5602,13 +6264,17 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
     def ResetTrimRange(self):
         if (
             self.runActive
-            or not hasattr(self, "frameScrubber")
-            or not hasattr(self, "viewportTabs")
-            or self.viewportTabs.currentIndex() != 0
+            or not self.inputPreviewFilenames
+            or not hasattr(self, "rangeField")
         ):
             return
 
-        self.MarkRangeFromScrubber("reset", self.frameScrubber.value)
+        frameCount = len(self.inputPreviewFilenames)
+        if self.InputTrimRange() == (0, frameCount):
+            return
+
+        self.ApplyTrimRange(0, frameCount, preserveScrubberView = True)
+        self.MarkProjectDirty()
 
     def MarkRangeFromFileList(self, markType):
         if self.runActive or not self.inputPreviewFilenames or not hasattr(self, "rangeField"):
@@ -5654,16 +6320,27 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         rangeStart = max(0, min(rangeStart, frameCount - 1))
         rangeStop = max(rangeStart + 1, min(rangeStop, frameCount))
+        self.ApplyTrimRange(rangeStart, rangeStop, preserveScrubberView = True)
+
+    def ApplyTrimRange(self, rangeStart, rangeStop, preserveScrubberView = False):
+        snapshot = self.ScrubberViewSnapshot() if preserveScrubberView else None
         try:
             self.suppressRangePreview = True
             self.rangeField.SetValues(rangeStart, rangeStop)
         finally:
             self.suppressRangePreview = False
+
         self.RefreshInputStatusLabel()
         self.RefreshInputPreviewMetadata()
         self.UpdateEffectiveOverrideValues()
         self.UpdateFrameScrubberHighlight()
         self.RefreshInputFileList()
+        self.UpdateInputFileActionButtons()
+        if preserveScrubberView:
+            self.UpdateFrameScrubber(preserveView = True)
+            self.RestoreScrubberViewSnapshot(snapshot)
+            self.UpdateFrameScrubberHighlight()
+            self.UpdatePreviewOverlay()
 
     def TrimDragStarted(self, *_):
         self.scrubberTrimDragStartRange = self.rangeField.Values()
@@ -5678,14 +6355,19 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         if hasattr(self, "viewportTabs") and self.viewportTabs.currentIndex() != 0:
             return
 
-        enabledFiles = self.EnabledInputFilenamesWithSourceIndices()
-        if not enabledFiles:
+        sequence, _manuallyEnabled = self.InputScrubberSequence()
+        entries = self.DisplayInputFileEntries()
+        if not sequence:
             return
 
-        frame = max(0, min(int(frame), len(enabledFiles) - 1))
+        frame = max(0, min(int(frame), len(sequence) - 1))
         rangeStart, rangeStop = self.rangeField.Values()
         frameCount = len(self.inputPreviewFilenames)
-        sourceFrame = enabledFiles[frame][1]
+        sourcePosition = sequence[frame][0]
+        if sourcePosition < 0 or sourcePosition >= len(entries):
+            return
+
+        sourceFrame = entries[sourcePosition][1]
         sourceStop = min(frameCount, sourceFrame + 1)
         dragMark = markType.startswith("drag-")
         if dragMark:
@@ -5712,16 +6394,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
             rangeStart = max(0, min(rangeStart, frameCount - 1))
             rangeStop = max(rangeStart + 1, min(rangeStop, frameCount))
-            try:
-                self.suppressRangePreview = True
-                self.rangeField.SetValues(rangeStart, rangeStop)
-            finally:
-                self.suppressRangePreview = False
-            self.RefreshInputStatusLabel()
-            self.RefreshInputPreviewMetadata()
-            self.UpdateEffectiveOverrideValues()
-            self.UpdateFrameScrubberHighlight()
-            self.RefreshInputFileList()
+            self.ApplyTrimRange(rangeStart, rangeStop, preserveScrubberView = True)
             return
 
         if markType == "reset":
@@ -5752,21 +6425,24 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         rangeStart = max(0, min(rangeStart, frameCount - 1))
         rangeStop = max(rangeStart + 1, min(rangeStop, frameCount))
 
-        try:
-            self.suppressRangePreview = True
-            self.rangeField.SetValues(rangeStart, rangeStop)
-        finally:
-            self.suppressRangePreview = False
-        self.RefreshInputStatusLabel()
-        self.RefreshInputPreviewMetadata()
-        self.UpdateEffectiveOverrideValues()
-        self.UpdateFrameScrubberHighlight()
-        self.RefreshInputFileList()
+        self.ApplyTrimRange(rangeStart, rangeStop, preserveScrubberView = True)
 
     def _BuildSettings(self):
         outputType = self._CleanFileType(self.outputFileType.currentText())
-        inputFilenames = self.InputReadFilenames()
+        renderPath = self.RenderPath()
+        pairBlur = self.pairBlurSpinBox.value()
+        pairBlurActive = renderPath == 1 and pairBlur > 0
+        if pairBlurActive:
+            inputFilenames = self.InputScrubberFilenames()
+            inputIndices = self.InputReadScrubberIndices()
+            transferOverrides = self.InputScrubberTransferOverrides()
+        else:
+            inputFilenames = self.InputReadFilenames()
+            inputIndices = None
+            transferOverrides = self.InputReadTransferOverrides()
         stopAfter = len(inputFilenames)
+        if inputIndices is not None:
+            stopAfter = len(inputIndices)
         previewEnabled = self.previewEnabled.isChecked()
         startAt = 0
         blendInLinear = self.blendInLinear.isChecked()
@@ -5776,9 +6452,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         return {
             "render": {
-                "path": self.RenderPath(),
+                "path": renderPath,
                 "windowSize": max(0, self.stackSizeSpinBox.value() - 1),
                 "pairOffset": self.CurrentShift(),
+                "pairBlur": pairBlur,
+                "pairKernel": self.pairBlurKernel.currentText(),
+                "stackDirection": self.stackDirection.currentText().lower(),
                 "blendInLinear": blendInLinear,
             },
             "input": {
@@ -5786,8 +6465,9 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 "inputFileType": "mixed",
                 "startAt": startAt,
                 "skipInput": 1,
-                "inputIndices": None,
+                "inputIndices": inputIndices,
                 "inputFilenames": inputFilenames,
+                "transferOverrides": transferOverrides,
                 "excludedFilenames": [],
                 "overrideTransferFunction": inputTransferOverride,
                 "transferFunction": self._TransferFunctionValue(self.inputTransferFunction),
@@ -5802,6 +6482,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 "decay": self.decay.Value(),
                 "scale": self.blendScaleSpinBox.value(),
                 "lift": self.blendOffsetSpinBox.value(),
+                "absolute": self.absoluteValues.isChecked(),
                 "opacity": self.opacity.Value(),
                 "middleGray": self.middleGray.Value() if self.useCustomMiddleGray.isChecked() else 0.5,
             },
@@ -5825,11 +6506,88 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             },
         }
 
+    def _EntryFilenameAndTransferOverride(self, entryId):
+        entry = self.InputEntryById(entryId)
+        if not entry:
+            return None, None
+        return entry.get("filename"), self.InputEntryTransferOverride(entry)
+
+    def _ApplyFinalOnlyIndependentRenderOptimization(self, settings):
+        if settings["output"].get("onlyExportFinalFrame") is not True:
+            return None
+
+        renderPath = int(settings["render"].get("path", 0))
+        if renderPath not in (1, 2):
+            return None
+
+        readEntryIds = self.InputReadEntryIds()
+        if not readEntryIds:
+            return None
+
+        optimizedEntryIds = []
+        if renderPath == 1:
+            if int(settings["render"].get("pairBlur", 0)) > 0:
+                return None
+
+            shift = int(settings["render"].get("pairOffset", 0))
+            currentEntryId = readEntryIds[-1]
+            pairedEntryId = None
+
+            if shift < 0:
+                pairedIndex = len(readEntryIds) - 1 + shift
+                if pairedIndex >= 0:
+                    pairedEntryId = readEntryIds[pairedIndex]
+            elif shift > 0:
+                scrubberEntryIds = self.InputScrubberEntryIds()
+                try:
+                    currentScrubberIndex = scrubberEntryIds.index(currentEntryId)
+                except ValueError:
+                    currentScrubberIndex = -1
+
+                pairedScrubberIndex = currentScrubberIndex + shift
+                if 0 <= pairedScrubberIndex < len(scrubberEntryIds):
+                    pairedEntryId = scrubberEntryIds[pairedScrubberIndex]
+                else:
+                    currentIndex = max(0, len(readEntryIds) - 1 - shift)
+                    currentEntryId = readEntryIds[currentIndex]
+                    pairedEntryId = readEntryIds[-1]
+            else:
+                pairedEntryId = currentEntryId
+
+            optimizedEntryIds = [currentEntryId]
+            if pairedEntryId is not None:
+                optimizedEntryIds.append(pairedEntryId)
+            settings["render"]["pairOffset"] = 1
+
+        elif renderPath == 2:
+            stackLength = max(1, int(settings["render"].get("windowSize", 0)) + 1)
+            optimizedEntryIds = readEntryIds[-stackLength:][::-1]
+            settings["render"]["windowSize"] = max(0, len(optimizedEntryIds) - 1)
+            settings["render"]["stackDirection"] = "future"
+
+        filenames = []
+        transferOverrides = []
+        for entryId in optimizedEntryIds:
+            filename, transferOverride = self._EntryFilenameAndTransferOverride(entryId)
+            if filename:
+                filenames.append(filename)
+                transferOverrides.append(transferOverride)
+
+        if not filenames:
+            return None
+
+        settings["input"]["inputFilenames"] = filenames
+        settings["input"]["transferOverrides"] = transferOverrides
+        settings["input"]["inputIndices"] = None
+        settings["output"]["stopAfter"] = 1
+        settings["output"]["skipOutput"] = 1
+        return optimizedEntryIds[:1]
+
     def InputScrubberStartIndex(self):
         if not self.inputPreviewFilenames:
             return 0
 
-        activeInputFiles = self.InputReadFilenames()
+        activeInputFiles = self.InputScrubberFilenames()
         if hasattr(self, "viewportTabs") and self.viewportTabs.currentIndex() == 0:
             return max(0, min(self.frameScrubber.value, len(activeInputFiles) - 1))
 
@@ -5842,10 +6600,21 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         return 0
 
     def ApplyPreviewRenderRange(self, settings):
+        pairBlurActive = int(settings["render"].get("path", 0)) == 1 and int(settings["render"].get("pairBlur", 0)) > 0
         if self.previewFrameCount == "range":
-            settings["output"]["stopAfter"] = max(1, len(settings["input"].get("inputFilenames") or []))
+            frameIndices = settings["input"].get("inputIndices")
+            if frameIndices is None:
+                settings["output"]["stopAfter"] = max(1, len(settings["input"].get("inputFilenames") or []))
+            else:
+                settings["output"]["stopAfter"] = max(1, len(frameIndices))
+        elif pairBlurActive:
+            settings["input"]["inputFilenames"] = self.InputScrubberFilenames()
+            settings["input"]["transferOverrides"] = self.InputScrubberTransferOverrides()
+            settings["input"]["inputIndices"] = self.InputReadScrubberIndicesFromScrubber(self.previewFrameCount, clampToTrim = True)
+            settings["output"]["stopAfter"] = max(1, len(settings["input"]["inputIndices"]))
         else:
             settings["input"]["inputFilenames"] = self.InputReadFilenamesFromScrubber(self.previewFrameCount, clampToTrim = True)
+            settings["input"]["transferOverrides"] = self.InputReadTransferOverridesFromScrubber(self.previewFrameCount, clampToTrim = True)
             settings["input"]["inputIndices"] = None
             settings["output"]["stopAfter"] = max(1, len(settings["input"]["inputFilenames"]))
         settings["output"]["skipOutput"] = 1
@@ -5961,6 +6730,14 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
                 self.CancelRender(resetUi = False)
             return
 
+        if getattr(self, "stackMemoryExceeded", False):
+            self.ShowErrorMessage(
+                "Stack Memory",
+                "Estimated stack memory exceeds currently available RAM.",
+                "Reduce the stack size or close other applications before exporting.",
+            )
+            return
+
         self.StartRender(previewOnly = False)
 
     def StartPreview(self):
@@ -5980,6 +6757,10 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             if self.previewFrameCount != "range":
                 renderEntryIds = self.InputReadEntryIdsFromScrubber(self.previewFrameCount, clampToTrim = True)
             self.ApplyPreviewRenderRange(settings)
+        else:
+            optimizedEntryIds = self._ApplyFinalOnlyIndependentRenderOptimization(settings)
+            if optimizedEntryIds is not None:
+                renderEntryIds = optimizedEntryIds
         if not self._ValidateSettings(settings, previewOnly):
             return
         renderFrameCount = max(0, int(settings["output"].get("stopAfter", len(renderEntryIds)) or len(renderEntryIds)))
@@ -6090,11 +6871,12 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.UpdateRunButtons()
         self.UpdateViewportFooterControls()
         self.UpdateViewportInfoVisibility()
+        self.UpdateRenderPathControls()
         self.UpdateBlendControlsEnabled()
         self.UpdateTransferOverrideControls()
         self.UpdateMiddleGrayControls()
         self.UpdatePreviewOptionsEnabled()
-        self.UpdateRenderPathControls()
+        self.UpdateBlendResetButtons()
         self.UpdateStatusBar()
 
     def BeginRenderInputSync(self):
@@ -6172,10 +6954,22 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         return spacer
 
     def UpdateRunButtons(self):
-        running = self.runActive
+        if not all(hasattr(self, name) for name in ("previewButton", "exportButton", "cancelButton")):
+            return
 
-        self.previewButton.setEnabled(not running)
-        self.exportButton.setEnabled(not running)
+        running = self.runActive
+        hasRenderFrames = bool(self.InputReadFilenames())
+        memoryExceeded = bool(getattr(self, "stackMemoryExceeded", False))
+
+        self.previewButton.setEnabled((not running) and hasRenderFrames)
+        self.exportButton.setEnabled((not running) and hasRenderFrames and not memoryExceeded)
+        self.previewButton.setToolTip("" if hasRenderFrames else "Add at least one image to the render list")
+        if not hasRenderFrames:
+            self.exportButton.setToolTip("Add at least one image to the render list")
+        elif memoryExceeded:
+            self.exportButton.setToolTip("Estimated stack memory exceeds currently available RAM")
+        else:
+            self.exportButton.setToolTip("")
         self.cancelButton.setEnabled(running)
         self.cancelButton.setText(IconButtonText("Stop"))
         self.UpdateViewportFooterControls()
@@ -6453,6 +7247,8 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.activeRenderEntryIds = []
         self.UpdateRunButtons()
         self.UpdatePreviewOptionsEnabled()
+        self.UpdateBlendControlsEnabled()
+        self.UpdateBlendResetButtons()
 
         if startExport:
             self.pendingExportAfterCancel = False

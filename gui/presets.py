@@ -2,7 +2,7 @@ import json
 import os
 import re
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtWidgets
 
 from .builtin_presets import BUILTIN_PRESETS
 from .resources import AppRoot
@@ -46,14 +46,18 @@ class PresetMixin:
             "blend": self.blendMode.currentText(),
             "scale": self.blendScaleSpinBox.value(),
             "lift": self.blendOffsetSpinBox.value(),
+            "absolute": self.absoluteValues.isChecked(),
             "intensity": self.opacity.Value(),
         }
         if renderPath == 0:
             data["spread"] = self.decay.Value()
         if renderPath == 1:
             data["shift"] = self.CurrentShift()
+            data["blur"] = self.pairBlurSpinBox.value()
+            data["kernel"] = self.pairBlurKernel.currentText()
         if renderPath == 2:
             data["size"] = self.stackSizeSpinBox.value()
+            data["direction"] = self.stackDirection.currentText()
         return data
 
     def ShiftFromData(self, data):
@@ -71,14 +75,18 @@ class PresetMixin:
             "blend": str(data["blend"]),
             "scale": float(data["scale"]),
             "lift": float(data["lift"]),
+            "absolute": bool(data["absolute"]),
             "intensity": float(data["intensity"]),
         }
         if renderPath == 0:
             comparable["spread"] = float(data["spread"])
         if renderPath == 1:
             comparable["shift"] = self.ShiftFromData(data)
+            comparable["blur"] = int(data["blur"])
+            comparable["kernel"] = str(data["kernel"])
         if renderPath == 2:
             comparable["size"] = int(data["size"])
+            comparable["direction"] = str(data["direction"])
         return comparable
 
     def PresetDataMatches(self, left, right):
@@ -92,6 +100,7 @@ class PresetMixin:
             and left["blend"] == right["blend"]
             and abs(left["scale"] - right["scale"]) <= 0.00075
             and abs(left["lift"] - right["lift"]) <= 0.00075
+            and left["absolute"] == right["absolute"]
             and abs(left["intensity"] - right["intensity"]) <= 0.00075
             and (
                 left["renderMode"] != "Gather"
@@ -99,11 +108,18 @@ class PresetMixin:
             )
             and (
                 left["renderMode"] != "Pair"
-                or left["shift"] == right["shift"]
+                or (
+                    left["shift"] == right["shift"]
+                    and left["blur"] == right["blur"]
+                    and left["kernel"] == right["kernel"]
+                )
             )
             and (
                 left["renderMode"] != "Stack"
-                or left["size"] == right["size"]
+                or (
+                    left["size"] == right["size"]
+                    and left["direction"] == right["direction"]
+                )
             )
         )
 
@@ -201,6 +217,20 @@ class PresetMixin:
         self.savePresetButton.setEnabled(dirty)
         self.UpdateBlendResetButtons()
 
+    def ClearLoadedPreset(self):
+        if not hasattr(self, "presetComboBox"):
+            return
+
+        self.ClearPresetDirtyIndicators()
+        if self.presetComboBox.currentIndex() != 0:
+            self.presetComboBox.blockSignals(True)
+            self.presetComboBox.setCurrentIndex(0)
+            self.presetComboBox.blockSignals(False)
+        self.activePresetCleanData = None
+        self.lastProjectPresetIdentity = self.SelectedPresetIdentity()
+        self.savePresetButton.setEnabled(True)
+        self.UpdateBlendResetButtons()
+
     def RefreshPresetList(self, selectedName = None, selectedKind = None):
         if not hasattr(self, "presetComboBox"):
             return
@@ -276,10 +306,14 @@ class PresetMixin:
                 self.decay.SetValue(float(preset["spread"]))
             if renderPath == 1:
                 self.pairDistanceSpinBox.setValue(self.ShiftFromData(preset))
+                self.pairBlurSpinBox.setValue(int(preset["blur"]))
+                self._SetComboText(self.pairBlurKernel, preset["kernel"])
             if renderPath == 2:
                 self.stackSizeSpinBox.setValue(int(preset["size"]))
+                self._SetComboText(self.stackDirection, preset["direction"])
             self.blendScaleSpinBox.setValue(float(preset["scale"]))
             self.blendOffsetSpinBox.setValue(float(preset["lift"]))
+            self.absoluteValues.setChecked(bool(preset["absolute"]))
             self.opacity.SetValue(float(preset["intensity"]))
             self.UpdatePresetDirtyIndicator()
         finally:

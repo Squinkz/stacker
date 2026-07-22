@@ -9,7 +9,9 @@ class BlendFunction:
     MAX = bnc.MaxBlend
     SCREEN = bnc.ScreenBlend
     ADD = bnc.AddBlend
+    ADDSUB = bnc.AddSubBlend
     SUBTRACT = bnc.SubtractBlend
+    SUBADD = bnc.SubAddBlend
     MULTIPLY = bnc.MultiplyBlend
     DIVIDE = bnc.DivideBlend
     OVERLAY = bnc.OverlayBlend
@@ -50,7 +52,9 @@ BLEND_MODE_IDS = {
     bnc.MaxBlend: bnc.BLEND_MODE_MAX,
     bnc.ScreenBlend: bnc.BLEND_MODE_SCREEN,
     bnc.AddBlend: bnc.BLEND_MODE_ADD,
+    bnc.AddSubBlend: bnc.BLEND_MODE_ADDSUB,
     bnc.SubtractBlend: bnc.BLEND_MODE_SUBTRACT,
+    bnc.SubAddBlend: bnc.BLEND_MODE_SUBADD,
     bnc.MultiplyBlend: bnc.BLEND_MODE_MULTIPLY,
     bnc.DivideBlend: bnc.BLEND_MODE_DIVIDE,
     bnc.OverlayBlend: bnc.BLEND_MODE_OVERLAY,
@@ -336,7 +340,8 @@ def SaveFrame(rgb, outSettings, frameNumber, logger):
     if outSettings.get("onlyExportFinalFrame", False):
         filename = f"{outSettings["outputFileName"]}.{outSettings["outputFileType"]}"
     else:
-        filename = f"{outSettings["outputFileName"]}_{frameNumber:04d}.{outSettings["outputFileType"]}"
+        frameDigits = max(4, int(outSettings.get("frameDigits", 4)))
+        filename = f"{outSettings["outputFileName"]}_{frameNumber:0{frameDigits}d}.{outSettings["outputFileType"]}"
     logger.PrintLogTime(f"Saved \"{filename}\"")
     transferName = TransferFunctionName(outSettings.get("exportTransferFunction", "sRGB / Display P3"))
     transferId = EncodeTransferFunctionId(transferName) if outSettings.get("blendInLinear", True) else bnc.TRANSFER_LINEAR
@@ -387,10 +392,16 @@ def ClampSettings(settings):
     settings["render"]["path"]           = min(max(0, int(settings["render"].get("path", 0))), 2)
     settings["render"]["windowSize"]     = max(1, int(settings["render"].get("windowSize", 5)))
     settings["render"]["pairOffset"]     = int(settings["render"].get("pairOffset", -1))
+    settings["render"]["pairBlur"]       = max(0, int(settings["render"].get("pairBlur", 0)))
+    pairKernel = str(settings["render"].get("pairKernel", "Gaussian")).lower()
+    settings["render"]["pairKernel"]     = pairKernel if pairKernel in ("box", "triangle", "semicircle", "gaussian", "cosine", "exponential") else "gaussian"
+    stackDirection = str(settings["render"].get("stackDirection", "past")).lower()
+    settings["render"]["stackDirection"] = stackDirection if stackDirection in ("past", "future", "centered") else "past"
     settings["render"]["blendInLinear"]   = bool(settings["render"].get("blendInLinear", True))
     settings["blend"]["decay"]            = float(min(max(0.0, settings["blend"]["decay"]), 1.0))
     settings["blend"]["scale"]            = float(settings["blend"].get("scale", 1.0))
     settings["blend"]["lift"]             = float(settings["blend"].get("lift", 0.0))
+    settings["blend"]["absolute"]         = bool(settings["blend"].get("absolute", False))
     settings["blend"]["opacity"]          = float(min(max(0.0, settings["blend"]["opacity"]), 1.0))
     settings["blend"]["middleGray"]       = float(min(max(0.0, settings["blend"].get("middleGray", bnc.LINEAR_0_5)), 1.0))
     settings["input"]["inputDirectory"]   = os.path.normpath(settings["input"]["inputDirectory"])
@@ -424,6 +435,14 @@ def ClampSettings(settings):
         if settings["input"].get("overrideTransferFunction") else
         None
     )
+    transferOverrides = settings["input"].get("transferOverrides")
+    if isinstance(transferOverrides, (list, tuple)):
+        settings["input"]["transferOverrides"] = [
+            TransferFunctionName(transferOverride) if transferOverride else None
+            for transferOverride in transferOverrides
+        ]
+    else:
+        settings["input"]["transferOverrides"] = []
     settings["input"]["resolutionOverrideSize"] = (
         (
             int(max(1, settings["input"].get("width", 1))),
@@ -458,7 +477,13 @@ def BlendModeName(mode):
         if name.startswith("_"):
             continue
         if getattr(BlendFunction, name) is mode:
-            return name.title().replace("Minmax", "Min/Max").replace("Maxmin", "Max/Min")
+            return (
+                name.title()
+                .replace("Minmax", "Min/Max")
+                .replace("Maxmin", "Max/Min")
+                .replace("Addsub", "Add/Sub")
+                .replace("Subadd", "Sub/Add")
+            )
 
     return getattr(mode, "__name__", str(mode))
 
@@ -468,6 +493,17 @@ def FormatBool(value):
 def FormatTransferSetting(enabled, transferName):
     transferName = TransferFunctionName(transferName)
     return f"{transferName} (override)" if enabled else f"{transferName} (default)"
+
+def FormatInputCurveSetting(inpSettings):
+    perFileCount = sum(1 for transferOverride in inpSettings.get("transferOverrides", []) if transferOverride)
+    globalOverride = inpSettings.get("transferFunctionOverride")
+    if perFileCount and globalOverride:
+        return f"Per-file overrides ({perFileCount}); {TransferFunctionName(globalOverride)} fallback override"
+    if perFileCount:
+        return f"Per-file overrides ({perFileCount}); metadata fallback"
+    if globalOverride:
+        return FormatTransferSetting(True, globalOverride)
+    return "Detected from image metadata"
 
 def FormatOutputName(outSettings):
     return outSettings["outputFileName"]
@@ -510,11 +546,7 @@ def WriteSettingsToFile(logger, settings, imageFilenames = None, inputIndices = 
     imageFilenames = imageFilenames or []
     inputIndices = inputIndices or []
     outputMode = "Final blend only" if outSettings.get("onlyExportFinalFrame", False) else "Image sequence"
-    inputCurve = (
-        FormatTransferSetting(True, inpSettings["transferFunctionOverride"])
-        if inpSettings.get("transferFunctionOverride") else
-        "Detected from image metadata"
-    )
+    inputCurve = FormatInputCurveSetting(inpSettings)
     resolution = OutputResolutionText(inpSettings, imageFilenames, inputIndices)
     saveOptions = {
         key: value
@@ -529,11 +561,16 @@ def WriteSettingsToFile(logger, settings, imageFilenames = None, inputIndices = 
         blendRows.append(("Spread", f"{blendSettings['decay']:.3f}"))
     elif renderSettings["path"] == 1:
         blendRows.append(("Shift", renderSettings.get("pairOffset", -1)))
+        blendRows.append(("Blur", renderSettings.get("pairBlur", 0)))
+        if int(renderSettings.get("pairBlur", 0)) > 0:
+            blendRows.append(("Kernel", str(renderSettings.get("pairKernel", "gaussian")).title()))
     elif renderSettings["path"] == 2:
         blendRows.append(("Size", renderSettings["windowSize"] + 1))
+        blendRows.append(("Direction", renderSettings.get("stackDirection", "past").title()))
     blendRows.extend((
         ("Gain", f"{blendSettings['scale']:.3f}"),
         ("Lift", f"{blendSettings['lift']:.3f}"),
+        ("Absolute Values", FormatBool(blendSettings.get("absolute", False))),
         ("Intensity", f"{blendSettings['opacity']:.3f}"),
         ("Blend in Linear", FormatBool(renderSettings.get("blendInLinear", True))),
         ("Middle Gray", f"{blendSettings['middleGray']:.3f}"),
@@ -608,26 +645,23 @@ def RenderFrameCount(inputIndices, renderSettings, stopAfter):
     frameCount = len(inputIndices)
     return int(min(frameCount, stopAfter))
 
-def RenderPathDescription(renderSettings):
-    renderPath = renderSettings["path"]
-    if renderPath == 1:
-        offset = int(renderSettings.get("pairOffset", 0))
-        sign = "+" if offset >= 0 else ""
-        return f"Pair (n{sign}{offset})"
-    if renderPath == 2:
-        return f"Stack ({renderSettings['windowSize'] + 1} frames)"
-    return "Gather"
-
 def ReadRenderImage(imageFilenames, imageIndex, logger, inpSettings, previewRenderScale, overrideTargetSize, expectedShape):
     targetSize = overrideTargetSize
     if targetSize is None and expectedShape is not None:
         targetSize = (expectedShape[1], expectedShape[0])
 
+    transferOverrides = inpSettings.get("transferOverrides") or []
+    transferOverride = (
+        transferOverrides[imageIndex]
+        if 0 <= imageIndex < len(transferOverrides) and transferOverrides[imageIndex] else
+        inpSettings.get("transferFunctionOverride")
+    )
+
     return ReadImage(
         imageFilenames[imageIndex],
         logger,
         previewRenderScale,
-        inpSettings.get("transferFunctionOverride"),
+        transferOverride,
         targetSize,
         inpSettings.get("resizeFilter", "Lanczos"),
         inpSettings.get("blendInLinear", True),
@@ -656,6 +690,7 @@ def ApplyPairBlendAndComposite(currentImg, previousImg, blendSettings, blendMode
             blendModeId,
             blendSettings["scale"],
             blendSettings["lift"],
+            blendSettings["absolute"],
             blendSettings["opacity"],
             blendSettings["middleGray"],
         )
@@ -663,12 +698,117 @@ def ApplyPairBlendAndComposite(currentImg, previousImg, blendSettings, blendMode
     blendResult = ApplyModeBlend(currentImg, previousImg, blendSettings)
     return ApplyFinalComposite(blendResult, currentImg, blendSettings)
 
+def PairTemporalKernelWeights(radius, kernelName):
+    radius = max(0, int(radius))
+    if radius <= 0:
+        return np.array([1.0], dtype = np.float32)
+
+    kernelName = str(kernelName or "gaussian").lower()
+    offsets = np.arange(-radius, radius + 1, dtype = np.float32)
+    distances = np.abs(offsets)
+
+    if kernelName == "box":
+        weights = np.ones_like(offsets)
+    elif kernelName == "triangle":
+        weights = (radius + 1.0) - distances
+    elif kernelName == "semicircle":
+        normalized = distances / (radius + 1.0)
+        weights = np.sqrt(np.maximum(0.0, 1.0 - (normalized * normalized)))
+    elif kernelName == "cosine":
+        normalized = distances / (radius + 1.0)
+        weights = 0.5 + (0.5 * np.cos(np.pi * normalized))
+    elif kernelName == "exponential":
+        scale = max(1.0, radius * 0.5)
+        weights = np.exp(-distances / scale)
+    else:
+        sigma = max(0.5, radius * 0.5)
+        weights = np.exp(-0.5 * (distances / sigma) ** 2)
+
+    total = float(np.sum(weights))
+    if total <= 0.0:
+        return np.array([1.0], dtype = np.float32)
+    return (weights / total).astype(np.float32)
+
+def PairTemporalBlurWeights(renderState, renderSettings):
+    radius = int(renderSettings.get("pairBlur", 0))
+    kernelName = str(renderSettings.get("pairKernel", "gaussian")).lower()
+    key = (radius, kernelName)
+    cache = renderState.setdefault("pairTemporalKernelWeights", {})
+    if key not in cache:
+        cache[key] = PairTemporalKernelWeights(radius, kernelName)
+    return cache[key]
+
+def ReadCachedPairFrame(sourceFrame, imageFilenames, logger, inpSettings, renderState, previewRenderScale, overrideTargetSize):
+    imageCache = renderState.setdefault("pairImageCache", {})
+    if sourceFrame not in imageCache:
+        image = ReadRenderImage(
+            imageFilenames,
+            sourceFrame,
+            logger,
+            inpSettings,
+            previewRenderScale,
+            overrideTargetSize,
+            renderState.get("expectedShape"),
+        )
+        if renderState.get("expectedShape") is None:
+            renderState["expectedShape"] = image.shape
+        imageCache[sourceFrame] = image
+    return imageCache[sourceFrame]
+
+def PrunePairTemporalCaches(renderState, keepStart, keepStop):
+    for cacheName in ("pairImageCache", "pairBlurCache"):
+        cache = renderState.get(cacheName)
+        if not cache:
+            continue
+        for frame in list(cache):
+            if frame < keepStart or frame > keepStop:
+                del cache[frame]
+
+def ReadTemporalBlurredPairFrame(sourceFrame, imageFilenames, logger, inpSettings, renderSettings, renderState, previewRenderScale, overrideTargetSize):
+    radius = int(renderSettings.get("pairBlur", 0))
+    if radius <= 0:
+        return ReadCachedPairFrame(
+            sourceFrame,
+            imageFilenames,
+            logger,
+            inpSettings,
+            renderState,
+            previewRenderScale,
+            overrideTargetSize,
+        )
+
+    blurCache = renderState.setdefault("pairBlurCache", {})
+    if sourceFrame in blurCache:
+        return blurCache[sourceFrame]
+
+    weights = PairTemporalBlurWeights(renderState, renderSettings)
+    output = None
+    lastFrame = len(imageFilenames) - 1
+    for weightIndex, offset in enumerate(range(-radius, radius + 1)):
+        blurSourceFrame = max(0, min(lastFrame, sourceFrame + offset))
+        image = ReadCachedPairFrame(
+            blurSourceFrame,
+            imageFilenames,
+            logger,
+            inpSettings,
+            renderState,
+            previewRenderScale,
+            overrideTargetSize,
+        )
+        weight = float(weights[weightIndex])
+        if output is None:
+            output = np.zeros_like(image)
+        bnc.AddWeightedImage(output, image, weight)
+
+    blurCache[sourceFrame] = output
+    return output
+
 def ApplyFinalComposite(blendResult, currentImg, blendSettings, blendModeId = None):
-    needsAdjustment = blendSettings["scale"] != 1.0 or blendSettings["lift"] != 0.0
+    needsAdjustment = blendSettings["scale"] != 1.0 or blendSettings["lift"] != 0.0 or blendSettings.get("absolute", False)
     if blendResult is currentImg and not needsAdjustment:
         return currentImg
     if needsAdjustment:
-        blendResult = bnc.ScaleOffset(blendResult, blendSettings["scale"], blendSettings["lift"])
+        blendResult = bnc.ScaleOffset(blendResult, blendSettings["scale"], blendSettings["lift"], blendSettings.get("absolute", False))
     if blendModeId == bnc.BLEND_MODE_NONE:
         return blendResult
     return bnc.AlphaBlend(currentImg, blendResult, blendSettings["opacity"])
@@ -705,6 +845,7 @@ def RenderAccumulatorPath(currentFrame, inputIndices, imageFilenames, logger, in
             blendSettings["decay"],
             blendSettings["scale"],
             blendSettings["lift"],
+            blendSettings["absolute"],
             blendSettings["opacity"],
             blendSettings["middleGray"],
         )
@@ -719,15 +860,16 @@ def RenderAccumulatorPath(currentFrame, inputIndices, imageFilenames, logger, in
     return currentImg
 
 def RenderPairPath(currentFrame, frameCount, inputIndices, imageFilenames, logger, inpSettings, blendSettings, renderSettings, blendModeId, renderState, previewRenderScale, overrideTargetSize):
-    imageIndex = inputIndices[currentFrame]
-    currentImg = ReadRenderImage(
+    currentSourceFrame = inputIndices[currentFrame]
+    currentImg = ReadTemporalBlurredPairFrame(
+        currentSourceFrame,
         imageFilenames,
-        imageIndex,
         logger,
         inpSettings,
+        renderSettings,
+        renderState,
         previewRenderScale,
         overrideTargetSize,
-        renderState.get("expectedShape"),
     )
 
     if renderState.get("expectedShape") is None:
@@ -737,23 +879,40 @@ def RenderPairPath(currentFrame, frameCount, inputIndices, imageFilenames, logge
     if pairedFrame < 0 or pairedFrame >= frameCount:
         return currentImg
 
-    pairedImg = ReadRenderImage(
+    pairedSourceFrame = inputIndices[pairedFrame]
+    pairedImg = ReadTemporalBlurredPairFrame(
+        pairedSourceFrame,
         imageFilenames,
-        inputIndices[pairedFrame],
+        logger,
+        inpSettings,
+        renderSettings,
+        renderState,
+        previewRenderScale,
+        overrideTargetSize,
+    )
+    radius = int(renderSettings.get("pairBlur", 0))
+    keepStart = min(currentSourceFrame, pairedSourceFrame) - radius - 2
+    keepStop = max(currentSourceFrame, pairedSourceFrame) + radius + 2
+    PrunePairTemporalCaches(renderState, keepStart, keepStop)
+    return ApplyPairBlendAndComposite(currentImg, pairedImg, blendSettings, blendModeId)
+
+def ReadStackImageForFrame(frame, inputIndices, imageFilenames, logger, inpSettings, previewRenderScale, overrideTargetSize, expectedShape):
+    return ReadRenderImage(
+        imageFilenames,
+        inputIndices[frame],
         logger,
         inpSettings,
         previewRenderScale,
         overrideTargetSize,
-        renderState.get("expectedShape"),
+        expectedShape,
     )
-    return ApplyPairBlendAndComposite(currentImg, pairedImg, blendSettings, blendModeId)
 
-def RenderStackPath(currentFrame, inputIndices, imageFilenames, logger, inpSettings, blendSettings, blendModeId, renderState, previewRenderScale, overrideTargetSize, lookbackFrames):
+def RenderStackPastPath(currentFrame, inputIndices, imageFilenames, logger, inpSettings, blendSettings, blendModeId, renderState, previewRenderScale, overrideTargetSize, lookbackFrames):
     imageStack = renderState.setdefault("imageStack", [])
-    imageIndex = inputIndices[currentFrame]
-    image = ReadRenderImage(
+    image = ReadStackImageForFrame(
+        currentFrame,
+        inputIndices,
         imageFilenames,
-        imageIndex,
         logger,
         inpSettings,
         previewRenderScale,
@@ -770,6 +929,128 @@ def RenderStackPath(currentFrame, inputIndices, imageFilenames, logger, inpSetti
 
     blendResult = ApplyStackBlend(imageStack[::-1], blendSettings, blendModeId)
     return ApplyFinalComposite(blendResult, imageStack[-1], blendSettings, blendModeId)
+
+def RenderStackFuturePath(currentFrame, frameCount, inputIndices, imageFilenames, logger, inpSettings, blendSettings, blendModeId, renderState, previewRenderScale, overrideTargetSize, lookaheadFrames):
+    maxStackLength = lookaheadFrames + 1
+    startFrame = currentFrame
+    stopFrame = min(len(inputIndices), currentFrame + maxStackLength)
+    desiredFrames = range(startFrame, stopFrame)
+    imageCache = renderState.setdefault("futureImageStack", {})
+
+    for frame in list(imageCache.keys()):
+        if frame < startFrame or frame >= stopFrame:
+            del imageCache[frame]
+
+    for frame in desiredFrames:
+        if frame in imageCache:
+            continue
+        image = ReadStackImageForFrame(
+            frame,
+            inputIndices,
+            imageFilenames,
+            logger,
+            inpSettings,
+            previewRenderScale,
+            overrideTargetSize,
+            renderState.get("expectedShape"),
+        )
+        if renderState.get("expectedShape") is None:
+            renderState["expectedShape"] = image.shape
+        imageCache[frame] = image
+
+    imageStack = [imageCache[frame] for frame in desiredFrames]
+    blendResult = ApplyStackBlend(imageStack, blendSettings, blendModeId)
+    return ApplyFinalComposite(blendResult, imageStack[0], blendSettings, blendModeId)
+
+def RenderStackCenteredPath(currentFrame, frameCount, inputIndices, imageFilenames, logger, inpSettings, blendSettings, blendModeId, renderState, previewRenderScale, overrideTargetSize, stackFrames):
+    maxStackLength = stackFrames + 1
+    beforeCount = maxStackLength // 2
+    afterCount = maxStackLength - beforeCount - 1
+    startFrame = currentFrame - beforeCount
+    stopFrame = currentFrame + afterCount + 1
+
+    if startFrame < 0:
+        stopFrame = min(len(inputIndices), stopFrame - startFrame)
+        startFrame = 0
+    if stopFrame > len(inputIndices):
+        startFrame = max(0, startFrame - (stopFrame - len(inputIndices)))
+        stopFrame = len(inputIndices)
+
+    desiredFrames = range(startFrame, stopFrame)
+    imageCache = renderState.setdefault("centeredImageStack", {})
+
+    for frame in list(imageCache.keys()):
+        if frame < startFrame or frame >= stopFrame:
+            del imageCache[frame]
+
+    for frame in desiredFrames:
+        if frame in imageCache:
+            continue
+        image = ReadStackImageForFrame(
+            frame,
+            inputIndices,
+            imageFilenames,
+            logger,
+            inpSettings,
+            previewRenderScale,
+            overrideTargetSize,
+            renderState.get("expectedShape"),
+        )
+        if renderState.get("expectedShape") is None:
+            renderState["expectedShape"] = image.shape
+        imageCache[frame] = image
+
+    currentImg = imageCache[currentFrame]
+    imageStack = [imageCache[frame] for frame in desiredFrames]
+    blendResult = ApplyStackBlend(imageStack, blendSettings, blendModeId)
+    return ApplyFinalComposite(blendResult, currentImg, blendSettings, blendModeId)
+
+def RenderStackPath(currentFrame, frameCount, inputIndices, imageFilenames, logger, inpSettings, blendSettings, blendModeId, renderState, previewRenderScale, overrideTargetSize, stackFrames, direction):
+    if direction == "future":
+        return RenderStackFuturePath(
+            currentFrame,
+            frameCount,
+            inputIndices,
+            imageFilenames,
+            logger,
+            inpSettings,
+            blendSettings,
+            blendModeId,
+            renderState,
+            previewRenderScale,
+            overrideTargetSize,
+            stackFrames,
+        )
+
+    if direction == "centered":
+        return RenderStackCenteredPath(
+            currentFrame,
+            frameCount,
+            inputIndices,
+            imageFilenames,
+            logger,
+            inpSettings,
+            blendSettings,
+            blendModeId,
+            renderState,
+            previewRenderScale,
+            overrideTargetSize,
+            stackFrames,
+        )
+
+    return RenderStackPastPath(
+        currentFrame,
+        inputIndices,
+        imageFilenames,
+        logger,
+        inpSettings,
+        blendSettings,
+        blendModeId,
+        renderState,
+        previewRenderScale,
+        overrideTargetSize,
+        stackFrames,
+    )
 
 def RenderPathFrame(currentFrame, frameCount, inputIndices, imageFilenames, logger, settings, renderState, blendModeId, previewRenderScale, overrideTargetSize):
     inpSettings = settings["input"]
@@ -796,6 +1077,7 @@ def RenderPathFrame(currentFrame, frameCount, inputIndices, imageFilenames, logg
     if renderPath == 2:
         return RenderStackPath(
             currentFrame,
+            frameCount,
             inputIndices,
             imageFilenames,
             logger,
@@ -806,6 +1088,7 @@ def RenderPathFrame(currentFrame, frameCount, inputIndices, imageFilenames, logg
             previewRenderScale,
             overrideTargetSize,
             renderSettings["windowSize"],
+            renderSettings.get("stackDirection", "past"),
         )
 
     return RenderAccumulatorPath(
@@ -846,15 +1129,14 @@ def BlendAndExport(settings, onLog = None, onProgress = None, onFps = None, onRe
     with loggerContext as logger:
         imageFilenames = GetFilenames(inpSettings, logger)
 
-        if inpSettings.get("reverse"):
-            imageFilenames = imageFilenames[::-1]
-
         stopAfter = outSettings["stopAfter"] if outSettings["stopAfter"] else np.inf
 
         startTimeFrame = time.time()
         elapsedTime = []
         inputIndices = InputFrameIndices(len(imageFilenames), inpSettings)
         frameCount = RenderFrameCount(inputIndices, renderSettings, stopAfter)
+        outputFrameCount = ((frameCount - 1) // outSettings["skipOutput"]) + 1 if frameCount > 0 else 0
+        outSettings["frameDigits"] = max(4, len(str(max(0, outputFrameCount - 1))))
         WriteSettingsToFile(logger, settings, imageFilenames, inputIndices, frameCount)
 
         if frameCount <= 0:

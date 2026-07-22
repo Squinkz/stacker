@@ -3,7 +3,7 @@ import os
 from PySide6 import QtCore, QtGui
 
 
-CURRENT_THEME = "dark_fire"
+CURRENT_THEME = "dark_ice"
 _ASSET_ICON_CACHE = {}
 _DARK_ASSET_ICON_CACHE = {}
 _SPLIT_ASSET_ICON_CACHE = {}
@@ -83,6 +83,12 @@ QSplitter::handle {
 }
 QSplitter::handle:hover {
     background: __PANEL_BORDER_HOVER__;
+}
+QScrollArea#sidebarScrollPage,
+QScrollArea#sidebarScrollPage > QWidget,
+QScrollArea#sidebarScrollPage > QWidget > QWidget {
+    background: __APP_BG__;
+    border: none;
 }
 QWidget#collapsibleSection {
     border: 1px solid __PANEL_BORDER_HOVER__;
@@ -322,6 +328,11 @@ QPushButton#viewportMenuItem:checked {
     border-color: __SELECTION__;
     color: __SELECTION_TEXT__;
 }
+QPushButton#viewportMenuItem[softDisabled="true"] {
+    background: transparent;
+    border-color: transparent;
+    color: __TEXT_DISABLED__;
+}
 QPushButton#viewportMenuItem QLabel {
     background: transparent;
     color: __TEXT__;
@@ -329,6 +340,9 @@ QPushButton#viewportMenuItem QLabel {
 QPushButton#viewportMenuItem:hover QLabel,
 QPushButton#viewportMenuItem:checked QLabel {
     color: __SELECTION_TEXT__;
+}
+QPushButton#viewportMenuItem[softDisabled="true"] QLabel {
+    color: __TEXT_DISABLED__;
 }
 QPushButton#headerMenuItem {
     background: transparent;
@@ -374,6 +388,9 @@ QPushButton#viewportMenuItem QLabel#menuShortcutLabel {
     font-size: 8pt;
 }
 QPushButton#headerMenuItem[softDisabled="true"] QLabel#menuShortcutLabel {
+    color: __TEXT_DISABLED__;
+}
+QPushButton#viewportMenuItem[softDisabled="true"] QLabel#menuShortcutLabel {
     color: __TEXT_DISABLED__;
 }
 QPushButton#headerMenuItem:hover QLabel#menuShortcutLabel,
@@ -542,6 +559,12 @@ QPushButton#previewButton:pressed,
 QToolButton#previewButton:pressed {
     background: __PREVIEW_PRESSED__;
     border-color: __PREVIEW_PRESSED__;
+}
+QPushButton#previewButton:disabled,
+QToolButton#previewButton:disabled {
+    color: __TEXT_DISABLED__;
+    background: __PREVIEW_DISABLED__;
+    border-color: __PREVIEW_DISABLED__;
 }
 QPushButton#cancelButton {
     background: __CANCEL_BG__;
@@ -804,8 +827,8 @@ QToolButton#previewButton:pressed {
 }
 QToolButton#previewButton:disabled {
     color: __TEXT_DISABLED__;
-    background: __DISABLED_BG__;
-    border-color: __DISABLED_BG__;
+    background: __PREVIEW_DISABLED__;
+    border-color: __PREVIEW_DISABLED__;
 }
 QPushButton#cancelButton {
     background: __CANCEL_BG__;
@@ -888,8 +911,8 @@ BASE_LIGHT_THEME = {
         "APP_BG": "#f0f0f0",
         "TEXT": "#202020",
         "TEXT_MUTED": "#666666",
-        "TEXT_DISABLED": "#8a8a8a",
-        "ICON_DISABLED": "#9a9a9a",
+        "TEXT_DISABLED": "#6f6f6f",
+        "ICON_DISABLED": "#787878",
         "FIELD_BG": "#ffffff",
         "FIELD_HOVER": "#e9e9e9",
         "FIELD_PRESSED": "#dddddd",
@@ -942,27 +965,95 @@ BASE_LIGHT_THEME = {
         "SCRUBBER_HANDLE_BORDER": "#1d4f83",
 }
 
+DARK_FIRE_BUTTON_COLORS = {
+        "EXPORT_BG": "#8a681f",
+        "EXPORT_HOVER": "#a98027",
+        "EXPORT_PRESSED": "#6d5018",
+        "EXPORT_DISABLED": "#604819",
+        "PREVIEW_BG": "#8a4f1f",
+        "PREVIEW_HOVER": "#a86428",
+        "PREVIEW_PRESSED": "#6d3d18",
+        "PREVIEW_DISABLED": "#603619",
+        "CANCEL_BG": "#6d2c2c",
+        "CANCEL_HOVER": "#8a3939",
+        "CANCEL_PRESSED": "#562323",
+}
+
+DARK_ICE_BUTTON_COLORS = {
+        "EXPORT_BG": "#24536a",
+        "EXPORT_HOVER": "#2f6d89",
+        "EXPORT_PRESSED": "#1c4052",
+        "EXPORT_DISABLED": "#1b3c4d",
+        "PREVIEW_BG": "#245f61",
+        "PREVIEW_HOVER": "#2f7d80",
+        "PREVIEW_PRESSED": "#1d4a4c",
+        "PREVIEW_DISABLED": "#1b4749",
+        "CANCEL_BG": "#56305f",
+        "CANCEL_HOVER": "#6f3e7b",
+        "CANCEL_PRESSED": "#44264b",
+}
+
+LIGHT_FIRE_BUTTON_COLORS = {
+        "EXPORT_BG": "#e2bd74",
+        "EXPORT_HOVER": "#d6aa57",
+        "EXPORT_PRESSED": "#c69743",
+        "EXPORT_DISABLED": "#cda85f",
+        "PREVIEW_BG": "#e2ad73",
+        "PREVIEW_HOVER": "#d89c5c",
+        "PREVIEW_PRESSED": "#c88948",
+        "PREVIEW_DISABLED": "#cb9558",
+        "CANCEL_BG": "#e0a0a0",
+        "CANCEL_HOVER": "#d58787",
+        "CANCEL_PRESSED": "#c77171",
+}
+
+LIGHT_ICE_BUTTON_COLORS = {
+        "EXPORT_BG": "#9cc6e4",
+        "EXPORT_HOVER": "#82b5d9",
+        "EXPORT_PRESSED": "#6ca4cf",
+        "EXPORT_DISABLED": "#7aa9c9",
+        "PREVIEW_BG": "#9bd6dc",
+        "PREVIEW_HOVER": "#80c8d0",
+        "PREVIEW_PRESSED": "#69b7c1",
+        "PREVIEW_DISABLED": "#75b7bf",
+        "CANCEL_BG": "#c3a7d6",
+        "CANCEL_HOVER": "#b491ca",
+        "CANCEL_PRESSED": "#a27cbd",
+}
+
 THEMES = {
-    "dark_fire": BASE_DARK_THEME,
+    "dark_fire": {
+        **BASE_DARK_THEME,
+        **DARK_FIRE_BUTTON_COLORS,
+        "SCRUBBER_HANDLE": "#ffad4f",
+        "SCRUBBER_HANDLE_BORDER": "#ffd3a0",
+    },
     "dark_ice": {
         **BASE_DARK_THEME,
-        "OVERLAY_TITLE": "#55d8d6",
+        **DARK_ICE_BUTTON_COLORS,
+        "OVERLAY_TITLE": "#4cdbe4",
     },
-    "light_fire": BASE_LIGHT_THEME,
+    "light_fire": {
+        **BASE_LIGHT_THEME,
+        **LIGHT_FIRE_BUTTON_COLORS,
+        "SCRUBBER_HANDLE": "#c86a1f",
+        "SCRUBBER_HANDLE_BORDER": "#7f3f12",
+    },
     "light_ice": {
         **BASE_LIGHT_THEME,
-        "OVERLAY_TITLE": "#155a9f",
+        **LIGHT_ICE_BUTTON_COLORS,
+        "OVERLAY_TITLE": "#2253a7",
     },
 }
 
 
 def NormalizeThemeName(themeName):
-    themeName = str(themeName or "dark_fire").strip().lower()
-    return THEME_ALIASES.get(themeName, "dark_fire")
+    themeName = str(themeName or "dark_ice").strip().lower()
+    return THEME_ALIASES.get(themeName, "dark_ice")
 
 
 def ThemeDisplayName(themeName = None):
-    return THEME_DISPLAY_NAMES.get(NormalizeThemeName(themeName or CURRENT_THEME), "Dark Fire")
+    return THEME_DISPLAY_NAMES.get(NormalizeThemeName(themeName or CURRENT_THEME), "Dark Ice")
 
 
 def ThemeDisplayNames():

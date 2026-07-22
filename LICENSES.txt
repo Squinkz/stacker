@@ -1,0 +1,56 @@
+Stacker Licenses
+================
+
+Stacker
+-------
+
+MIT License
+
+Copyright (c) 2026 Dieter Stassen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Third-party Python dependencies
+-------------------------------
+
+Stacker uses the following Python packages:
+
+- PySide6: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+- shiboken6: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+- Pillow: MIT-CMU
+- NumPy: BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
+- Numba: BSD
+- llvmlite: BSD-2-Clause AND Apache-2.0 WITH LLVM-exception
+
+PySide6 and shiboken6 provide the Qt application framework bindings. If this
+application is distributed as a packaged executable, the distributor is
+responsible for complying with the applicable Qt/PySide license terms.
+
+
+Icon and artwork notices
+------------------------
+
+Many interface icons are based on Google's Material Symbols / Material Icons,
+which are licensed under the Apache License, Version 2.0.
+
+The GitHub logo is a trademark of GitHub, Inc. and is used only as a link to
+the project author's GitHub page.
+
+Stacker logos and theme artwork are copyright (c) 2026 Dieter Stassen.

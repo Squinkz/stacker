@@ -9,8 +9,8 @@ from gui.resources import BuildStyle, ThemeAppIconPath, ThemeName
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(BuildStyle("dark_fire"))
-    appIcon = QtGui.QIcon(ThemeAppIconPath("dark_fire"))
+    app.setStyleSheet(BuildStyle("dark_ice"))
+    appIcon = QtGui.QIcon(ThemeAppIconPath("dark_ice"))
     app.setWindowIcon(appIcon)
     window = MainWindow()
     activeIcon = QtGui.QIcon(ThemeAppIconPath(ThemeName()))

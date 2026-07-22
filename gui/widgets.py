@@ -6,6 +6,271 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .resources import AssetIcon, SplitAssetIcon, ThemeColor, ThemeQColor
 
 
+class ClickDismissFilter(QtCore.QObject):
+    def __init__(self, dialog, actionCallbacks = None):
+        super().__init__(dialog)
+        self.dialog = dialog
+        self.pendingUrl = None
+        self.pendingAction = None
+        self.actionCallbacks = actionCallbacks or {}
+
+    def UrlForWidget(self, widget):
+        while widget is not None:
+            url = widget.property("aboutUrl")
+            if url:
+                return url
+            widget = widget.parentWidget()
+        return None
+
+    def UrlForEvent(self, watched):
+        if isinstance(watched, QtWidgets.QWidget):
+            url = self.UrlForWidget(watched)
+            if url:
+                return url
+
+        widget = QtWidgets.QApplication.widgetAt(QtGui.QCursor.pos())
+        if widget is not None:
+            return self.UrlForWidget(widget)
+
+        return None
+
+    def ActionForWidget(self, widget):
+        while widget is not None:
+            actionName = widget.property("aboutAction")
+            if actionName:
+                return actionName
+            widget = widget.parentWidget()
+        return None
+
+    def ActionForEvent(self, watched):
+        if isinstance(watched, QtWidgets.QWidget):
+            actionName = self.ActionForWidget(watched)
+            if actionName:
+                return actionName
+
+        widget = QtWidgets.QApplication.widgetAt(QtGui.QCursor.pos())
+        if widget is not None:
+            return self.ActionForWidget(widget)
+
+        return None
+
+    def OpenUrl(self, url):
+        if not url:
+            return False
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+        return True
+
+    def TriggerAction(self, actionName):
+        callback = self.actionCallbacks.get(actionName)
+        if not callback:
+            return False
+        callback()
+        return True
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+            url = self.UrlForEvent(watched)
+            if url:
+                self.pendingUrl = url
+                return True
+            actionName = self.ActionForEvent(watched)
+            if actionName:
+                self.pendingAction = actionName
+                return True
+            self.dialog.accept()
+            return True
+
+        if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            url = self.pendingUrl or self.UrlForEvent(watched)
+            actionName = self.pendingAction or self.ActionForEvent(watched)
+            self.pendingUrl = None
+            self.pendingAction = None
+            if self.OpenUrl(url):
+                self.dialog.accept()
+                return True
+            if self.TriggerAction(actionName):
+                self.dialog.accept()
+                return True
+            self.dialog.accept()
+            return True
+
+        if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
+            url = self.UrlForEvent(watched)
+            if self.OpenUrl(url):
+                self.dialog.accept()
+                return True
+            actionName = self.ActionForEvent(watched)
+            if self.TriggerAction(actionName):
+                self.dialog.accept()
+                return True
+            self.dialog.accept()
+            return True
+
+        return super().eventFilter(watched, event)
+
+
+class ContextSubmenuController(QtCore.QObject):
+    def __init__(self, owner, rootMenu, parentButton, populateCallback):
+        super().__init__(parentButton)
+        self.owner = owner
+        self.rootMenu = rootMenu
+        self.parentButton = parentButton
+        self.populateCallback = populateCallback
+        self.childMenu = None
+        self.leaveParentTimer = QtCore.QTimer(self)
+        self.leaveParentTimer.setSingleShot(True)
+        self.leaveParentTimer.setInterval(80)
+        self.leaveParentTimer.timeout.connect(self.HideIfPointerLeftMenus)
+        self.leaveChildTimer = QtCore.QTimer(self)
+        self.leaveChildTimer.setSingleShot(True)
+        self.leaveChildTimer.setInterval(500)
+        self.leaveChildTimer.timeout.connect(self.HideIfPointerLeftChild)
+        self.pointerWatchTimer = QtCore.QTimer(self)
+        self.pointerWatchTimer.setInterval(25)
+        self.pointerWatchTimer.timeout.connect(self.HideIfPointerLeftMenus)
+        self.parentButton.installEventFilter(self)
+        self.rootMenu.installEventFilter(self)
+        self.rootMenu.aboutToHide.connect(self.HideChildMenu)
+
+    def eventFilter(self, watched, event):
+        if watched is QtWidgets.QApplication.instance():
+            if event.type() == QtCore.QEvent.Type.MouseMove:
+                if (
+                    self.childMenu is not None
+                    and not self.PointerInWidget(self.parentButton)
+                    and not self.PointerInWidget(self.childMenu)
+                ):
+                    self.HideChildMenu()
+                return False
+            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                if self.childMenu is not None:
+                    inParent = self.PointerInWidget(self.parentButton)
+                    inChild = self.PointerInWidget(self.childMenu)
+                    inRoot = self.PointerInWidget(self.rootMenu)
+                    if not inChild:
+                        self.HideChildMenu()
+                        if not inParent and not inRoot:
+                            self.rootMenu.hide()
+                return False
+
+        if watched is self.rootMenu:
+            if event.type() == QtCore.QEvent.Type.MouseButtonPress and self.childMenu is not None:
+                self.HideChildMenu()
+                return False
+
+        if watched is self.parentButton:
+            if event.type() == QtCore.QEvent.Type.Enter:
+                self.SetParentForcedIdle(False)
+                self.ShowChildMenu()
+                return False
+            if event.type() == QtCore.QEvent.Type.Leave:
+                if not self.PointerInWidget(self.childMenu):
+                    self.HideChildMenu()
+                return False
+            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                self.SetParentForcedIdle(False)
+                self.ShowChildMenu()
+                return True
+            if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+                return True
+        elif watched is self.childMenu:
+            if event.type() == QtCore.QEvent.Type.Enter:
+                self.pointerWatchTimer.stop()
+                self.leaveChildTimer.stop()
+                self.parentButton.setChecked(True)
+                return False
+            if event.type() == QtCore.QEvent.Type.Leave:
+                self.leaveChildTimer.start()
+                return False
+        return super().eventFilter(watched, event)
+
+    def ShowChildMenu(self):
+        self.leaveParentTimer.stop()
+        self.leaveChildTimer.stop()
+        if self.childMenu is None:
+            self.childMenu = QtWidgets.QMenu(self.rootMenu)
+            self.childMenu.setObjectName("viewportContextMenu")
+            self.childMenu.installEventFilter(self)
+            self.childMenu.aboutToHide.connect(self.ChildMenuAboutToHide)
+            self.populateCallback(self.childMenu)
+            QtWidgets.QApplication.instance().installEventFilter(self)
+            self.pointerWatchTimer.start()
+        self.parentButton.setChecked(True)
+        self.SetParentForcedIdle(False)
+        self.childMenu.popup(self.ChildMenuPosition())
+
+    def ChildMenuPosition(self):
+        if self.childMenu is None:
+            return QtCore.QPoint()
+
+        parentTopLeft = self.parentButton.mapToGlobal(QtCore.QPoint(0, 0))
+        parentRect = QtCore.QRect(parentTopLeft, self.parentButton.size())
+        size = self.childMenu.sizeHint()
+        screen = QtGui.QGuiApplication.screenAt(parentRect.center()) or QtGui.QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else QtWidgets.QApplication.primaryScreen().availableGeometry()
+        x = parentRect.right() + 1
+        if x + size.width() > available.right():
+            x = parentRect.left() - size.width()
+        x = max(available.left(), x)
+
+        y = parentRect.top()
+        if y + size.height() > available.bottom():
+            y = available.bottom() - size.height()
+        y = max(available.top(), y)
+        return QtCore.QPoint(x, y)
+
+    def PointerInWidget(self, widget):
+        if widget is None or not widget.isVisible():
+            return False
+        position = QtGui.QCursor.pos()
+        return widget.rect().contains(widget.mapFromGlobal(position))
+
+    def HideIfPointerLeftMenus(self):
+        if self.PointerInWidget(self.parentButton):
+            return
+        if self.PointerInWidget(self.childMenu):
+            self.pointerWatchTimer.stop()
+            return
+        self.HideChildMenu()
+
+    def HideIfPointerLeftChild(self):
+        if self.PointerInWidget(self.childMenu) or self.PointerInWidget(self.parentButton):
+            return
+        self.HideChildMenu()
+
+    def HideChildMenu(self):
+        self.leaveParentTimer.stop()
+        self.leaveChildTimer.stop()
+        self.pointerWatchTimer.stop()
+        if self.childMenu is not None:
+            self.childMenu.hide()
+            self.childMenu.deleteLater()
+            self.childMenu = None
+        QtWidgets.QApplication.instance().removeEventFilter(self)
+        self.parentButton.setChecked(False)
+        self.parentButton.setDown(False)
+        self.parentButton.clearFocus()
+        if not self.PointerInWidget(self.parentButton):
+            self.SetParentForcedIdle(True)
+        self.parentButton.style().unpolish(self.parentButton)
+        self.parentButton.style().polish(self.parentButton)
+        self.parentButton.update()
+        self.rootMenu.update()
+
+    def SetParentForcedIdle(self, enabled):
+        self.parentButton.setProperty("forceIdle", bool(enabled))
+        self.parentButton.style().unpolish(self.parentButton)
+        self.parentButton.style().polish(self.parentButton)
+        self.parentButton.update()
+
+    def ChildMenuAboutToHide(self):
+        if QtWidgets.QApplication.mouseButtons() == QtCore.Qt.MouseButton.NoButton:
+            return
+        if self.PointerInWidget(self.parentButton) or self.PointerInWidget(self.rootMenu):
+            return
+        QtCore.QTimer.singleShot(0, self.rootMenu.hide)
+
+
 class RightAlignedMenuToolButton(QtWidgets.QToolButton):
 
     def __init__(self, parent = None):
@@ -1508,23 +1773,30 @@ class FrameScrubber(QtWidgets.QWidget):
             return
 
         frame = self.value
+        trimActive = bool(
+            hasattr(parent, "TrimRangeIsActive")
+            and parent.TrimRangeIsActive()
+        )
         menu = QtWidgets.QMenu(self)
         menu.setObjectName("viewportContextMenu")
         self.AddScrubberMenuButton(menu, SplitAssetIcon("data_array_24dp_E3E3E3.svg", "left"), "Mark In", lambda: self.markRequested.emit("in", frame), shortcutText = "I")
         self.AddScrubberMenuButton(menu, SplitAssetIcon("data_array_24dp_E3E3E3.svg", "right"), "Mark Out", lambda: self.markRequested.emit("out", frame), shortcutText = "O")
-        self.AddScrubberMenuButton(menu, "refresh_24dp_E3E3E3.svg", "Clear Range", lambda: self.markRequested.emit("reset", frame), shortcutText = "Alt+X")
+        if trimActive:
+            self.AddScrubberMenuButton(menu, "refresh_24dp_E3E3E3.svg", "Clear Range", lambda: self.markRequested.emit("reset", frame), shortcutText = "Alt+X")
         menu.addSeparator()
         self.AddScrubberMenuButton(menu, "zoom_in_24dp_E3E3E3.svg", "Zoom in", lambda: self.ZoomBy(1.25))
         self.AddScrubberMenuButton(menu, "zoom_out_24dp_E3E3E3.svg", "Zoom out", lambda: self.ZoomBy(0.8))
         self.AddScrubberMenuButton(menu, "refresh_24dp_E3E3E3.svg", "Reset zoom", self.ResetZoom)
         menu.exec(event.globalPos())
 
-    def AddScrubberMenuButton(self, menu, icon, text, callback, shortcutText = ""):
+    def AddScrubberMenuButton(self, menu, icon, text, callback, shortcutText = "", enabled = True):
         action = QtWidgets.QWidgetAction(menu)
         button = QtWidgets.QPushButton()
         button.setObjectName("viewportMenuItem")
         button.setFlat(True)
-        button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        button.setEnabled(enabled)
+        button.setProperty("softDisabled", not enabled)
+        button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor if enabled else QtCore.Qt.CursorShape.ArrowCursor)
         button.setMinimumWidth(250)
         row = QtWidgets.QHBoxLayout(button)
         row.setContentsMargins(12, 0, 14, 0)
@@ -1534,15 +1806,27 @@ class FrameScrubber(QtWidgets.QWidget):
         iconLabel = QtWidgets.QLabel()
         iconLabel.setObjectName("menuIconLabel")
         iconLabel.setFixedSize(18, 18)
-        iconLabel.setPixmap(menuIcon.pixmap(18, 18))
+        iconPixmap = menuIcon.pixmap(18, 18)
+        if not enabled:
+            tinted = QtGui.QPixmap(iconPixmap.size())
+            tinted.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(tinted)
+            painter.drawPixmap(0, 0, iconPixmap)
+            painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(tinted.rect(), ThemeQColor("TEXT_DISABLED"))
+            painter.end()
+            iconPixmap = tinted
+        iconLabel.setPixmap(iconPixmap)
         iconLabel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         textLabel = QtWidgets.QLabel(text)
         textLabel.setObjectName("menuTextLabel")
+        textLabel.setProperty("softDisabled", not enabled)
         textLabel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         shortcutLabel = QtWidgets.QLabel(shortcutText)
         shortcutLabel.setObjectName("menuShortcutLabel")
+        shortcutLabel.setProperty("softDisabled", not enabled)
         shortcutLabel.setMinimumWidth(24)
         shortcutLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         shortcutLabel.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -1556,7 +1840,8 @@ class FrameScrubber(QtWidgets.QWidget):
             menu.hide()
             callback()
 
-        button.clicked.connect(Trigger)
+        if enabled:
+            button.clicked.connect(Trigger)
         action.setDefaultWidget(button)
         menu.addAction(action)
         return button
@@ -1744,21 +2029,45 @@ def OverrideField(fieldWidget, checkbox):
     return widget
 
 
-def SectionHeading(text):
-    label = QtWidgets.QLabel(text)
-    label.setStyleSheet("font-size: 11pt; font-weight: 700; padding-top: 4px; padding-bottom: 4px;")
+class SectionHeadingWidget(QtWidgets.QWidget):
+    def __init__(self, text, icon = None):
+        super().__init__()
+        self.iconName = icon if isinstance(icon, str) else None
 
-    line = QtWidgets.QFrame()
-    line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-    line.setObjectName("sectionHeadingLine")
+        label = QtWidgets.QLabel(text)
+        label.setStyleSheet("font-size: 11pt; font-weight: 700; padding-top: 4px; padding-bottom: 4px;")
 
-    widget = QtWidgets.QWidget()
-    layout = QtWidgets.QHBoxLayout(widget)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(10)
-    layout.addWidget(label)
-    layout.addWidget(line, 1)
-    return widget
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        line.setObjectName("sectionHeadingLine")
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.iconLabel = None
+        if icon is not None:
+            self.iconLabel = QtWidgets.QLabel()
+            self.iconLabel.setFixedSize(18, 18)
+            layout.addWidget(self.iconLabel, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(label)
+        layout.addWidget(line, 1)
+        self.setObjectName("sectionHeading")
+        self.RefreshIcon(icon)
+
+    def RefreshIcon(self, icon = None):
+        if self.iconLabel is None:
+            return
+
+        if icon is None:
+            icon = self.iconName
+        if isinstance(icon, str):
+            self.iconLabel.setPixmap(AssetIcon(icon).pixmap(18, 18))
+        elif isinstance(icon, QtGui.QIcon):
+            self.iconLabel.setPixmap(icon.pixmap(18, 18))
+
+
+def SectionHeading(text, icon = None):
+    return SectionHeadingWidget(text, icon)
 
 
 def IconButtonText(text):
@@ -1789,7 +2098,7 @@ def OutputNameTypeField(nameField, typeComboBox, optionsButton):
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(8)
 
-    dotLabel = QtWidgets.QLabel("_000x.")
+    dotLabel = QtWidgets.QLabel("_0000.")
     dotLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
     widget.sequenceSuffixLabel = dotLabel
     nameField.setMinimumWidth(120)

@@ -1,11 +1,12 @@
 import json
 import os
+import ctypes
 
 from PySide6 import QtCore, QtWidgets
 
 from .config import CONFIG_FILENAME
 from .file_list import ENTRY_ID_ROLE
-from .resources import AppRoot, ThemeDisplayName, ThemeName
+from .resources import AppRoot, ThemeColor, ThemeDisplayName, ThemeName
 from render.renderer import TransferFunctionNames
 
 
@@ -82,9 +83,22 @@ class ProjectMixin:
         self.pairDistanceLabel.setVisible(pairVisible)
         self.pairDistanceField.setVisible(pairVisible)
         self.pairDistanceField.setEnabled((not self.runActive) and pairVisible)
+        self.pairBlurLabel.setVisible(pairVisible)
+        self.pairBlurField.setVisible(pairVisible)
+        self.pairBlurField.setEnabled((not self.runActive) and pairVisible)
+        self.pairKernelLabel.setVisible(pairVisible)
+        self.pairBlurKernel.setVisible(pairVisible)
+        self.pairBlurKernel.setEnabled((not self.runActive) and pairVisible)
         self.stackSizeLabel.setVisible(stackVisible)
         self.stackSizeField.setVisible(stackVisible)
         self.stackSizeField.setEnabled((not self.runActive) and stackVisible)
+        if hasattr(self, "stackMemoryLabel"):
+            self.stackMemoryField.setVisible(stackVisible)
+            self.stackMemorySpacer.setVisible(stackVisible)
+        self.stackDirectionLabel.setVisible(stackVisible)
+        self.stackDirection.setVisible(stackVisible)
+        self.stackDirection.setEnabled((not self.runActive) and stackVisible)
+        self.UpdateStackMemoryEstimate()
         self.UpdateStackSizeWarning()
         self.decayLabel.setVisible(decayVisible)
         self.decayField.setVisible(decayVisible)
@@ -100,13 +114,18 @@ class ProjectMixin:
             return preset["spread"]
         if key == "shift" and renderMode == "Pair" and "shift" in preset:
             return preset["shift"]
+        if key == "blur" and renderMode == "Pair" and "blur" in preset:
+            return preset["blur"]
         if key == "size" and renderMode == "Stack" and "size" in preset:
             return preset["size"]
 
+        if key == "size":
+            return min(10, self.EffectiveStackSizeMaximum())
+
         defaults = {
-            "spread": 0.5,
+            "spread": 1.0,
             "shift": -1,
-            "size": min(10, self.EffectiveStackSizeMaximum()),
+            "blur": 0,
             "scale": 1.0,
             "lift": 0.0,
             "intensity": 1.0,
@@ -122,6 +141,8 @@ class ProjectMixin:
             self.decay.SetValue(float(value))
         elif key == "shift":
             self.pairDistanceSpinBox.setValue(int(value))
+        elif key == "blur":
+            self.pairBlurSpinBox.setValue(int(value))
         elif key == "size":
             self.stackSizeSpinBox.setValue(int(value))
         elif key == "scale":
@@ -137,6 +158,8 @@ class ProjectMixin:
             return self.decay.Value()
         if key == "shift":
             return self.pairDistanceSpinBox.value()
+        if key == "blur":
+            return self.pairBlurSpinBox.value()
         if key == "size":
             return self.stackSizeSpinBox.value()
         if key == "scale":
@@ -152,6 +175,11 @@ class ProjectMixin:
             return
 
         for key, button in self.blendResetButtons.items():
+            field = button.parentWidget()
+            if field is not None and field.isHidden():
+                button.setEnabled(False)
+                continue
+
             current = float(self.BlendControlValue(key))
             target = float(self.BlendResetTarget(key))
             button.setEnabled((not self.runActive) and abs(current - target) > 0.0005)
@@ -200,6 +228,7 @@ class ProjectMixin:
         self.stackSizeSlider.blockSignals(True)
         self.stackSizeSlider.setValue(min(currentValue, sliderMaximum))
         self.stackSizeSlider.blockSignals(False)
+        self.UpdateStackMemoryEstimate()
         self.UpdateStackSizeWarning()
         self.UpdateBlendResetButtons()
 
@@ -211,7 +240,90 @@ class ProjectMixin:
         self.stackSizeSlider.blockSignals(True)
         self.stackSizeSlider.setValue(sliderValue)
         self.stackSizeSlider.blockSignals(False)
+        self.UpdateStackMemoryEstimate()
         self.UpdateStackSizeWarning()
+
+    def AvailableSystemMemoryBytes(self):
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(MemoryStatusEx)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except (AttributeError, OSError):
+            pass
+        return None
+
+    def UpdateStackMemoryEstimate(self):
+        if not hasattr(self, "stackMemoryLabel"):
+            return
+
+        self.stackMemoryExceeded = False
+        if hasattr(self, "stackMemoryIcon"):
+            self.stackMemoryIcon.hide()
+        if hasattr(self, "stackMemoryDetailLabel"):
+            self.stackMemoryDetailLabel.hide()
+            self.stackMemoryDetailLabel.setText("")
+
+        filenames = self.InputReadFilenames() if hasattr(self, "InputReadFilenames") else []
+        if not filenames:
+            self.stackMemoryLabel.setText("Memory Required: --")
+            self.stackMemoryLabel.setStyleSheet(f"font-style: italic; color: {ThemeColor('TEXT')};")
+            if hasattr(self, "UpdateRunButtons"):
+                self.UpdateRunButtons()
+            return
+
+        dimensions = self.CachedImageDimensions(filenames[0])
+        if not dimensions:
+            self.stackMemoryLabel.setText("Memory Required: --")
+            self.stackMemoryLabel.setStyleSheet(f"font-style: italic; color: {ThemeColor('TEXT')};")
+            if hasattr(self, "UpdateRunButtons"):
+                self.UpdateRunButtons()
+            return
+
+        width, height = dimensions
+        stackSize = max(1, int(self.stackSizeSpinBox.value()))
+        byteCount = int(width) * int(height) * 3 * 4 * stackSize
+        availableBytes = self.AvailableSystemMemoryBytes()
+        colorKey = "TEXT"
+        detailText = ""
+        iconName = None
+        if availableBytes:
+            if byteCount > availableBytes:
+                colorKey = "ERROR"
+                iconName = "error_24dp_E3E3E3.svg"
+                detailText = f"Exceeds available RAM: {self.FormatByteSize(availableBytes)}"
+                self.stackMemoryExceeded = self.RenderPath() == 2
+            elif byteCount > availableBytes * 0.7:
+                colorKey = "WARNING"
+                iconName = "warning_24dp_E3E3E3.svg"
+                detailText = f"High usage; available RAM: {self.FormatByteSize(availableBytes)}"
+
+        if hasattr(self, "stackMemoryIcon"):
+            self.stackMemoryIcon.setVisible(bool(iconName))
+            if iconName:
+                self.stackMemoryIcon.setPixmap(self.TintedAssetPixmap(iconName, colorKey, 18))
+
+        self.stackMemoryLabel.setText(f"Memory Required: {self.FormatByteSize(byteCount)}")
+        self.stackMemoryLabel.setStyleSheet(f"font-style: italic; color: {ThemeColor(colorKey)};")
+        if hasattr(self, "stackMemoryDetailLabel"):
+            self.stackMemoryDetailLabel.setText(detailText)
+            self.stackMemoryDetailLabel.setVisible(bool(detailText))
+            self.stackMemoryDetailLabel.setStyleSheet(f"font-style: italic; color: {ThemeColor(colorKey)};")
+        if hasattr(self, "UpdateRunButtons"):
+            self.UpdateRunButtons()
 
     def PairDistanceSpinBoxChanged(self, value):
         if not hasattr(self, "pairDistanceSlider"):
@@ -222,6 +334,16 @@ class ProjectMixin:
         self.pairDistanceSlider.blockSignals(True)
         self.pairDistanceSlider.setValue(sliderValue)
         self.pairDistanceSlider.blockSignals(False)
+
+    def PairBlurSpinBoxChanged(self, value):
+        if not hasattr(self, "pairBlurSlider"):
+            return
+
+        value = int(value)
+        sliderValue = max(self.pairBlurSlider.minimum(), min(value, self.pairBlurSlider.maximum()))
+        self.pairBlurSlider.blockSignals(True)
+        self.pairBlurSlider.setValue(sliderValue)
+        self.pairBlurSlider.blockSignals(False)
 
     def BlendScaleSliderChanged(self, value):
         if not hasattr(self, "blendScaleSpinBox"):
@@ -267,7 +389,7 @@ class ProjectMixin:
             self.RenderPath() == 2
             and self.stackSizeSpinBox.value() > self.stackSizeSlider.maximum()
         )
-        self.stackSizeWarningLabel.setVisible(visible)
+        self.stackSizeWarningField.setVisible(visible)
         self.stackSizeWarningSpacer.setVisible(visible)
 
     def _UiConfig(self):
@@ -298,10 +420,13 @@ class ProjectMixin:
             },
             "input": {
                 "files": [
-                    {
+                    ({
                         "path": entry["filename"],
                         "enabled": entry["id"] not in self.disabledInputFilenames,
-                    }
+                    } | ({
+                        "transferOverrideEnabled": bool(entry.get("transferOverrideEnabled", False)),
+                        "transferFunction": entry.get("transferFunction", "sRGB / Display P3"),
+                    } if entry.get("transferOverrideEnabled", False) or entry.get("transferFunction") else {}))
                     for entry in self.inputFileEntries
                 ],
                 "rangeStart": rangeStart,
@@ -315,9 +440,13 @@ class ProjectMixin:
                 "spread": self.decay.Value(),
                 "scale": self.blendScaleSpinBox.value(),
                 "lift": self.blendOffsetSpinBox.value(),
+                "absolute": self.absoluteValues.isChecked(),
                 "intensity": self.opacity.Value(),
                 "size": self.stackSizeSpinBox.value(),
+                "direction": self.stackDirection.currentText(),
                 "shift": self.CurrentShift(),
+                "blur": self.pairBlurSpinBox.value(),
+                "kernel": self.pairBlurKernel.currentText(),
             },
             "output": {
                 "directory": self.outputDirectory.Text(),
@@ -570,6 +699,9 @@ class ProjectMixin:
 
     def MarkProjectDirty(self, *args, section = None):
         if self.suppressProjectDirty:
+            return
+        if self.pendingUndoTransactionSnapshot is not None:
+            self.SetProjectDirty(True)
             return
         self.CaptureUndoState(section = section)
         self.UpdateProjectDirtyFromSnapshot()
@@ -839,12 +971,16 @@ class ProjectMixin:
                 "preset": None,
                 "renderMode": "Gather",
                 "blend": "Max (Lighten)",
-                "spread": 0.5,
+                "spread": 1.0,
                 "scale": 1.0,
                 "lift": 0.0,
+                "absolute": False,
                 "intensity": 1.0,
                 "size": 10,
+                "direction": "Past",
                 "shift": -1,
+                "blur": 0,
+                "kernel": "Gaussian",
             },
             "output": {
                 "directory": "",
@@ -926,10 +1062,14 @@ class ProjectMixin:
             self._SetComboText(self.blendMode, blendConfig.get("blend"))
             self.SetRenderPath(self.PresetRenderPathFromData(blendConfig))
             self.pairDistanceSpinBox.setValue(self.ShiftFromData(blendConfig))
+            self.pairBlurSpinBox.setValue(int(blendConfig.get("blur", self.pairBlurSpinBox.value())))
+            self._SetComboText(self.pairBlurKernel, blendConfig.get("kernel", self.pairBlurKernel.currentText()))
             self.stackSizeSpinBox.setValue(int(blendConfig.get("size", self.stackSizeSpinBox.value())))
+            self._SetComboText(self.stackDirection, blendConfig.get("direction", self.stackDirection.currentText()))
             self.decay.SetValue(float(blendConfig.get("spread", self.decay.Value())))
             self.blendScaleSpinBox.setValue(float(blendConfig.get("scale", self.blendScaleSpinBox.value())))
             self.blendOffsetSpinBox.setValue(float(blendConfig.get("lift", self.blendOffsetSpinBox.value())))
+            self.absoluteValues.setChecked(bool(blendConfig.get("absolute", self.absoluteValues.isChecked())))
             self.opacity.SetValue(float(blendConfig.get("intensity", self.opacity.Value())))
             if self.SelectPresetByIdentity(blendConfig.get("preset")):
                 data = self.presetComboBox.itemData(self.presetComboBox.currentIndex())
@@ -1013,7 +1153,12 @@ class ProjectMixin:
         for index, item in enumerate(files if isinstance(files, list) else []):
             if index >= len(self.inputFileEntries):
                 break
-            enabled = bool(item.get("enabled", True)) if isinstance(item, dict) else True
+            isItemDict = isinstance(item, dict)
+            enabled = bool(item.get("enabled", True)) if isItemDict else True
+            if isItemDict:
+                self.inputFileEntries[index]["transferOverrideEnabled"] = bool(item.get("transferOverrideEnabled", False))
+                if item.get("transferFunction"):
+                    self.inputFileEntries[index]["transferFunction"] = str(item.get("transferFunction"))
             if not enabled:
                 disabledIds.add(self.inputFileEntries[index]["id"])
         self.disabledInputFilenames = disabledIds
@@ -1075,10 +1220,14 @@ class ProjectMixin:
         self._SetComboText(self.blendMode, blendConfig.get("blend"))
         self.SetRenderPath(self.PresetRenderPathFromData(blendConfig))
         self.pairDistanceSpinBox.setValue(self.ShiftFromData(blendConfig))
+        self.pairBlurSpinBox.setValue(int(blendConfig.get("blur", self.pairBlurSpinBox.value())))
+        self._SetComboText(self.pairBlurKernel, blendConfig.get("kernel", self.pairBlurKernel.currentText()))
         self.stackSizeSpinBox.setValue(int(blendConfig.get("size", self.stackSizeSpinBox.value())))
+        self._SetComboText(self.stackDirection, blendConfig.get("direction", self.stackDirection.currentText()))
         self.decay.SetValue(float(blendConfig.get("spread", self.decay.Value())))
         self.blendScaleSpinBox.setValue(float(blendConfig.get("scale", self.blendScaleSpinBox.value())))
         self.blendOffsetSpinBox.setValue(float(blendConfig.get("lift", self.blendOffsetSpinBox.value())))
+        self.absoluteValues.setChecked(bool(blendConfig.get("absolute", self.absoluteValues.isChecked())))
         self.opacity.SetValue(float(blendConfig.get("intensity", self.opacity.Value())))
         self.UpdateBlendControlsEnabled()
         if self.SelectPresetByIdentity(blendConfig.get("preset")):

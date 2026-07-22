@@ -7,6 +7,13 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.nuitka-cache/
+
+# Build outputs
+build/
+*.build/
+*.dist/
+*.onefile-build/
 
 # Local environments
 .venv/
@@ -15,6 +22,7 @@ env/
 
 # Local user/app state
 stacker.cfg
+presets/
 *.log
 
 # Render/project outputs that may be created inside the app folder
