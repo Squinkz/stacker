@@ -36,6 +36,7 @@ APP_DESCRIPTION = (
     "from classic star trails to motion extraction and fixed-length stack blends."
 )
 APP_GITHUB_URL = "https://github.com/Squinkz"
+APP_ISSUES_URL = "https://github.com/Squinkz/stacker/issues"
 FILE_INFO_DIALOG_WIDTH = 640
 FILE_INFO_VALUE_WIDTH = 430
 
@@ -1843,6 +1844,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.outputNameTypeField = OutputNameTypeField(self.outputFileName, self.outputFileType, self.outputOptionsButton)
         self.UpdateOutputSequenceSuffixLabel()
         self.AddFixedFormRow(form, "Filename", self.outputNameTypeField, self.IO_LABEL_WIDTH)
+        self.AddFixedFormRow(form, "Only export every", self.skipOutput, self.IO_LABEL_WIDTH)
         AddSectionGap()
         form.addRow(SectionHeading("Resolution", "image_aspect_ratio_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(form, "Export Resolution", OverrideField(ResolutionField(self.overrideWidth, self.overrideHeight), self.overrideResolution), self.IO_LABEL_WIDTH)
@@ -1855,7 +1857,6 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         form.addRow(SectionHeading("Color", "gamma_24dp_E3E3E3.svg"))
         self.AddFixedFormRow(form, "Output Curve", OverrideField(self.outputTransferFunction, self.overrideOutputTransfer), self.IO_LABEL_WIDTH)
         AddSectionGap()
-        self.AddFixedFormRow(form, "Only export every", self.skipOutput, self.IO_LABEL_WIDTH)
         self.AddFixedFormRow(form, "", CheckboxField(self.previewEnabled), self.IO_LABEL_WIDTH)
 
         layout.addLayout(form)
@@ -2453,7 +2454,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         linkRow.addStretch(1)
         linkRow.addWidget(self.CreateAboutLinkItem("github", "Github", APP_GITHUB_URL))
         linkRow.addSpacing(8)
-        linkRow.addWidget(self.CreateAboutLinkItem("bug_report_24dp_E3E3E3.svg", "Report Issue"))
+        linkRow.addWidget(self.CreateAboutLinkItem("bug_report_24dp_E3E3E3.svg", "Report Issue", APP_ISSUES_URL))
         linkRow.addSpacing(8)
         linkRow.addWidget(self.CreateAboutLinkItem("attribution_24dp_E3E3E3.svg", "Licenses", actionName = "licenses"))
         linkRow.addStretch(1)
