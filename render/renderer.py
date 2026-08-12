@@ -63,6 +63,13 @@ BLEND_MODE_IDS = {
     bnc.MaxMinBlend: bnc.BLEND_MODE_MAXMIN,
 }
 
+MIDDLE_GRAY_BLEND_MODE_IDS = (
+    bnc.BLEND_MODE_OVERLAY,
+    bnc.BLEND_MODE_UNDERLAY,
+    bnc.BLEND_MODE_MINMAX,
+    bnc.BLEND_MODE_MAXMIN,
+)
+
 TRANSFER_IDS = {
     "sRGB / Display P3": bnc.TRANSFER_SRGB,
     "Adobe RGB": bnc.TRANSFER_GAMMA22,
@@ -330,10 +337,11 @@ def ReadImage(filename, logger, downsampleScale = 1, transferOverride = None, ta
             )
             img = img.resize(targetSize, ResizeFilter(resizeFilterName))
 
+        rgbUint8 = np.asarray(img, dtype = np.uint8)
         if blendInLinear:
-            rgb = transferFunction(np.array(img, dtype = np.float32))
+            rgb = transferFunction(rgbUint8)
         else:
-            rgb = bnc.Uint8ToNormalizedFloat(np.asarray(img, dtype = np.uint8))
+            rgb = bnc.Uint8ToNormalizedFloat(rgbUint8)
     return rgb
 
 def SaveFrame(rgb, outSettings, frameNumber, logger):
@@ -672,6 +680,13 @@ def ApplyModeBlend(currentImg, previousImg, blendSettings, blendModeId = None):
         return currentImg
 
     if blendModeId is not None:
+        middleGray = blendSettings["middleGray"]
+        modeUsesMiddleGray = blendModeId in MIDDLE_GRAY_BLEND_MODE_IDS
+        if (
+            blendSettings["mode"] is not None
+            and (not modeUsesMiddleGray or middleGray == bnc.LINEAR_0_5)
+        ):
+            return blendSettings["mode"](currentImg, previousImg)
         return bnc.BlendPair(currentImg, previousImg, blendModeId, blendSettings["opacity"], blendSettings["middleGray"])
 
     if blendSettings["mode"] is None:
@@ -684,6 +699,17 @@ def ApplyPairBlendAndComposite(currentImg, previousImg, blendSettings, blendMode
         return currentImg
 
     if blendModeId is not None:
+        middleGray = blendSettings["middleGray"]
+        modeUsesMiddleGray = blendModeId in MIDDLE_GRAY_BLEND_MODE_IDS
+        if (
+            blendSettings["mode"] is not None
+            and (not modeUsesMiddleGray or middleGray == bnc.LINEAR_0_5)
+            and blendSettings["scale"] == 1.0
+            and blendSettings["lift"] == 0.0
+            and not blendSettings["absolute"]
+            and blendSettings["opacity"] == 1.0
+        ):
+            return blendSettings["mode"](currentImg, previousImg)
         return bnc.BlendPairAndComposite(
             currentImg,
             previousImg,
@@ -809,7 +835,7 @@ def ApplyFinalComposite(blendResult, currentImg, blendSettings, blendModeId = No
         return currentImg
     if needsAdjustment:
         blendResult = bnc.ScaleOffset(blendResult, blendSettings["scale"], blendSettings["lift"], blendSettings.get("absolute", False))
-    if blendModeId == bnc.BLEND_MODE_NONE:
+    if blendModeId == bnc.BLEND_MODE_NONE or blendSettings["opacity"] == 1.0:
         return blendResult
     return bnc.AlphaBlend(currentImg, blendResult, blendSettings["opacity"])
 

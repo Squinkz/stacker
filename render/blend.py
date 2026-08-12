@@ -40,18 +40,24 @@ TRANSFER_GAMMA22 = 1
 TRANSFER_PROPHOTO = 2
 TRANSFER_LINEAR = 3
 
+SRGB_TO_LINEAR_LUT = np.array(
+    [
+        (value / 255.0) / 12.92
+        if value / 255.0 <= 0.04045 else
+        (((value / 255.0) + 0.055) / 1.055) ** 2.4
+        for value in range(256)
+    ],
+    dtype = np.float32,
+)
+
 @njit(parallel = True, fastmath = True, cache = NUMBA_CACHE)
 def SrgbToLinear(rgb):
     h, w, c = rgb.shape
-    out = np.empty_like(rgb, dtype=np.float32)
+    out = np.empty((h, w, c), dtype = np.float32)
     for i in prange(h):
         for j in range(w):
             for k in range(c):
-                v = rgb[i, j, k] * INV_255
-                if v <= 0.04045:
-                    out[i, j, k] = v * INV_12_92
-                else:
-                    out[i, j, k] = ((v + 0.055) * INV_1_055) ** 2.4
+                out[i, j, k] = SRGB_TO_LINEAR_LUT[rgb[i, j, k]]
     return out
 
 @njit(parallel = True, fastmath = True, cache = NUMBA_CACHE)
@@ -146,7 +152,13 @@ def LinearToProPhoto(rgb):
 
 @njit(parallel = True, fastmath = True, cache = NUMBA_CACHE)
 def LinearTransferToLinear(rgb):
-    return rgb * INV_255
+    h, w, c = rgb.shape
+    out = np.empty((h, w, c), dtype = np.float32)
+    for y in prange(h):
+        for x in range(w):
+            for k in range(c):
+                out[y, x, k] = rgb[y, x, k] * INV_255
+    return out
 
 @njit(parallel = True, fastmath = True, cache = NUMBA_CACHE)
 def Uint8ToNormalizedFloat(rgb):
@@ -222,13 +234,33 @@ def BlendValue(background, foreground, mode, middleGray):
         v = background / foreground
         return 1.0 if v > 1.0 else v
     if mode == BLEND_MODE_OVERLAY:
+        if middleGray == LINEAR_0_5:
+            if background <= LINEAR_0_5:
+                return 2.0 * background * foreground
+            return 1.0 - (2.0 * (1.0 - background) * (1.0 - foreground))
+        if middleGray <= 0.0:
+            if background <= 0.0:
+                return foreground
+            return 1.0 - ((1.0 - background) * (1.0 - foreground))
+        if middleGray >= 1.0:
+            return background * foreground
         if background <= middleGray:
-            return 2.0 * background * foreground
-        return 1.0 - (2.0 * (1.0 - background) * (1.0 - foreground))
+            return (background * foreground) / middleGray
+        return 1.0 - (((1.0 - background) * (1.0 - foreground)) / (1.0 - middleGray))
     if mode == BLEND_MODE_UNDERLAY:
-        if background >= middleGray:
-            return 2.0 * background * foreground
-        return 1.0 - (2.0 * (1.0 - background) * (1.0 - foreground))
+        if middleGray == LINEAR_0_5:
+            if foreground <= LINEAR_0_5:
+                return 2.0 * foreground * background
+            return 1.0 - (2.0 * (1.0 - foreground) * (1.0 - background))
+        if middleGray <= 0.0:
+            if foreground <= 0.0:
+                return background
+            return 1.0 - ((1.0 - foreground) * (1.0 - background))
+        if middleGray >= 1.0:
+            return foreground * background
+        if foreground <= middleGray:
+            return (foreground * background) / middleGray
+        return 1.0 - (((1.0 - foreground) * (1.0 - background)) / (1.0 - middleGray))
     if mode == BLEND_MODE_MINMAX:
         if background > middleGray:
             return background if background < foreground else foreground
@@ -254,10 +286,29 @@ def BlendValue(background, foreground, mode, middleGray):
 @njit(parallel = True, fastmath = True, cache = NUMBA_CACHE)
 def BlendAndComposite(current, accumulated, mode, decay, scale, offset, absoluteValues, opacity, middleGray):
     h, w, c = current.shape
-    newAccumulated = np.empty_like(current)
     adjust = scale != 1.0 or offset != 0.0 or absoluteValues
     zeroScale = scale == 0.0
 
+    if not adjust and (mode == BLEND_MODE_NONE or opacity == 1.0):
+        output = np.empty_like(current)
+        if mode == BLEND_MODE_NONE:
+            invOpacity = 1.0 - opacity
+            for y in prange(h):
+                for x in range(w):
+                    for k in range(c):
+                        output[y, x, k] = opacity * current[y, x, k] + invOpacity * accumulated[y, x, k]
+            return output, output
+
+        invDecay = 1.0 - decay
+        for y in prange(h):
+            for x in range(w):
+                for k in range(c):
+                    currentValue = current[y, x, k]
+                    blendedValue = BlendValue(currentValue, accumulated[y, x, k], mode, middleGray)
+                    output[y, x, k] = decay * blendedValue + invDecay * currentValue
+        return output, output
+
+    newAccumulated = np.empty_like(current)
     if mode == BLEND_MODE_NONE:
         invOpacity = 1.0 - opacity
         output = np.empty_like(current)
@@ -481,7 +532,7 @@ def UnderlayBlend(background, foreground):
             for k in range(c):
                 a = background[y, x, k]
                 b = foreground[y, x, k]
-                if a >= LINEAR_0_5:
+                if b <= LINEAR_0_5:
                     out[y, x, k] = 2.0 * a * b
                 else:
                     out[y, x, k] = 1.0 - (2.0 * (1.0 - a) * (1.0 - b))

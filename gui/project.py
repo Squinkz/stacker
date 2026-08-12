@@ -1,18 +1,116 @@
-import json
-import os
+import copy
 import ctypes
+import json
+import math
+import os
+import tempfile
 
 from PySide6 import QtCore, QtWidgets
 
-from .config import CONFIG_FILENAME
+from .config import BLEND_MODES, CONFIG_FILENAME, OUTPUT_TYPES
 from .file_list import ENTRY_ID_ROLE
 from .resources import AppRoot, ThemeColor, ThemeDisplayName, ThemeName
-from render.renderer import TransferFunctionNames
+from render.renderer import ResizeFilterNames, TransferFunctionNames
 
 
 class ProjectMixin:
     def ConfigPath(self):
         return os.path.join(AppRoot(), CONFIG_FILENAME)
+
+    def WriteJsonAtomically(self, filename, data):
+        directory = os.path.dirname(os.path.abspath(filename))
+        basename = os.path.basename(filename)
+        tempPath = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding = "utf-8",
+                dir = directory,
+                prefix = f".{basename}.",
+                suffix = ".tmp",
+                delete = False,
+            ) as tempFile:
+                tempPath = tempFile.name
+                json.dump(data, tempFile, indent = 2, allow_nan = False)
+                tempFile.write("\n")
+                tempFile.flush()
+                os.fsync(tempFile.fileno())
+            os.replace(tempPath, filename)
+        except Exception:
+            if tempPath:
+                try:
+                    os.unlink(tempPath)
+                except OSError:
+                    pass
+            raise
+
+    def ValidateConfigData(self, config, defaults, strict = False, configName = "config"):
+        if not isinstance(config, dict):
+            if strict:
+                raise ValueError(f"{configName} must be a JSON object.")
+            config = {}
+
+        validated = copy.deepcopy(defaults)
+        pendingObjects = [(config, validated, configName)]
+        while pendingObjects:
+            source, target, objectPath = pendingObjects.pop()
+            for key, defaultValue in tuple(target.items()):
+                if key not in source:
+                    continue
+
+                value = source[key]
+                valuePath = f"{objectPath}.{key}"
+                valid = True
+                if isinstance(defaultValue, dict):
+                    if isinstance(value, dict):
+                        pendingObjects.append((value, target[key], valuePath))
+                    else:
+                        valid = False
+                elif isinstance(defaultValue, list):
+                    if isinstance(value, list):
+                        target[key] = copy.deepcopy(value)
+                    else:
+                        valid = False
+                elif isinstance(defaultValue, bool):
+                    if isinstance(value, bool):
+                        target[key] = value
+                    else:
+                        valid = False
+                elif isinstance(defaultValue, int):
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        target[key] = value
+                    else:
+                        valid = False
+                elif isinstance(defaultValue, float):
+                    try:
+                        finiteValue = math.isfinite(value)
+                    except (TypeError, OverflowError):
+                        finiteValue = False
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and finiteValue:
+                        target[key] = float(value)
+                    else:
+                        valid = False
+                elif isinstance(defaultValue, str):
+                    if isinstance(value, str):
+                        target[key] = value
+                    else:
+                        valid = False
+                elif defaultValue is None:
+                    if isinstance(value, float) and not math.isfinite(value):
+                        valid = False
+                    else:
+                        target[key] = copy.deepcopy(value)
+                elif isinstance(value, type(defaultValue)):
+                    target[key] = copy.deepcopy(value)
+                else:
+                    valid = False
+
+                if strict and not valid:
+                    expectedType = type(defaultValue).__name__ if defaultValue is not None else "JSON value"
+                    raise ValueError(f"{valuePath} must be a valid {expectedType}.")
+
+        return validated
 
     def _SetComboText(self, comboBox, text):
         if text is None:
@@ -522,9 +620,8 @@ class ProjectMixin:
 
     def SaveUiConfig(self):
         try:
-            with open(self.ConfigPath(), "w", encoding = "utf-8") as configFile:
-                json.dump(self._UiConfig(), configFile, indent = 2)
-        except OSError:
+            self.WriteJsonAtomically(self.ConfigPath(), self._UiConfig())
+        except (OSError, TypeError, ValueError):
             pass
 
     def _ProjectConfig(self):
@@ -638,9 +735,8 @@ class ProjectMixin:
             return False
 
         try:
-            with open(filename, "w", encoding = "utf-8") as projectFile:
-                json.dump(self._ProjectConfig(), projectFile, indent = 2)
-        except OSError as error:
+            self.WriteJsonAtomically(filename, self._ProjectConfig())
+        except (OSError, TypeError, ValueError) as error:
             self.ShowErrorMessage("Save Project", f"Could not save project:\n\n{error}")
             return False
 
@@ -673,8 +769,13 @@ class ProjectMixin:
             self.ShowErrorMessage("Open Project", f"Could not open project:\n\n{error}")
             return False
 
-        if not isinstance(config, dict):
-            self.ShowErrorMessage("Open Project", "The selected file is not a valid Stacker project.")
+        try:
+            config = self.ValidateProjectConfig(config)
+        except ValueError as error:
+            self.ShowErrorMessage(
+                "Open Project",
+                f"The selected file is not a valid Stacker project:\n\n{error}",
+            )
             return False
 
         self.suppressProjectDirty = True
@@ -1020,6 +1121,245 @@ class ProjectMixin:
             },
         }
 
+    def ValidateProjectConfig(self, config, strict = True):
+        if not isinstance(config, dict):
+            if strict:
+                raise ValueError("The project root must be a JSON object.")
+            config = {}
+
+        if strict:
+            if config.get("type") != "stackerProject":
+                raise ValueError("The project type must be \"stackerProject\".")
+            if config.get("version") != 1 or isinstance(config.get("version"), bool):
+                raise ValueError("Only Stacker project version 1 is supported.")
+
+        defaults = self.DefaultProjectConfig()
+        validated = self.ValidateConfigData(config, defaults, strict = strict, configName = "project")
+        validated["version"] = 1
+        validated["type"] = "stackerProject"
+
+        transferFunctions = TransferFunctionNames()
+        normalizedFiles = []
+        for index, item in enumerate(validated["input"]["files"]):
+            itemPath = f"project.input.files[{index}]"
+            if isinstance(item, str):
+                filename = item.strip()
+                if not filename:
+                    if strict:
+                        raise ValueError(f"{itemPath} must contain a non-empty path.")
+                    continue
+                normalizedFiles.append({"path": filename, "enabled": True})
+                continue
+
+            if not isinstance(item, dict):
+                if strict:
+                    raise ValueError(f"{itemPath} must be a path string or JSON object.")
+                continue
+
+            filename = item.get("path")
+            if not isinstance(filename, str) or not filename.strip():
+                if strict:
+                    raise ValueError(f"{itemPath}.path must be a non-empty string.")
+                continue
+
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                if strict:
+                    raise ValueError(f"{itemPath}.enabled must be a boolean.")
+                enabled = True
+
+            transferOverrideEnabled = item.get("transferOverrideEnabled", False)
+            if not isinstance(transferOverrideEnabled, bool):
+                if strict:
+                    raise ValueError(f"{itemPath}.transferOverrideEnabled must be a boolean.")
+                transferOverrideEnabled = False
+
+            normalizedItem = {
+                "path": filename.strip(),
+                "enabled": enabled,
+            }
+            transferFunction = item.get("transferFunction")
+            if transferFunction is not None:
+                if not isinstance(transferFunction, str):
+                    if strict:
+                        raise ValueError(f"{itemPath}.transferFunction must be a string.")
+                elif transferOverrideEnabled and transferFunction not in transferFunctions:
+                    if strict:
+                        raise ValueError(f"{itemPath}.transferFunction is not supported.")
+                    transferOverrideEnabled = False
+                else:
+                    normalizedItem["transferFunction"] = transferFunction
+            if transferOverrideEnabled:
+                normalizedItem["transferOverrideEnabled"] = True
+                if "transferFunction" not in normalizedItem:
+                    if strict:
+                        raise ValueError(f"{itemPath}.transferFunction is required when its override is enabled.")
+                    normalizedItem["transferOverrideEnabled"] = False
+            normalizedFiles.append(normalizedItem)
+        validated["input"]["files"] = normalizedFiles
+
+        preset = validated["blend"]["preset"]
+        if preset is not None and not isinstance(preset, dict):
+            if strict:
+                raise ValueError("project.blend.preset must be a JSON object or null.")
+            validated["blend"]["preset"] = None
+
+        enumFields = (
+            ("blend", "renderMode", ("Gather", "Pair", "Stack")),
+            ("blend", "blend", tuple(BLEND_MODES.keys())),
+            ("blend", "direction", ("Past", "Future", "Centered")),
+            ("blend", "kernel", ("Box", "Triangle", "Semicircle", "Gaussian", "Cosine", "Exponential")),
+            ("output", "type", tuple(OUTPUT_TYPES)),
+            ("output", "exportMode", ("sequence", "final")),
+            ("transferOverrides", "inputFunction", transferFunctions),
+            ("transferOverrides", "outputFunction", transferFunctions),
+            ("transferOverrides", "resizeFilter", ResizeFilterNames()),
+        )
+        for section, key, allowedValues in enumFields:
+            value = validated[section][key]
+            if value not in allowedValues:
+                if strict:
+                    raise ValueError(f"project.{section}.{key} has an unsupported value.")
+                validated[section][key] = defaults[section][key]
+
+        fileCount = len(normalizedFiles)
+        integerRanges = (
+            ("input", "rangeStart", 0, fileCount),
+            ("input", "rangeStop", 0, fileCount),
+            ("input", "skip", 1, 999999),
+            ("blend", "size", 1, 9999),
+            ("blend", "shift", -9999, 9999),
+            ("blend", "blur", 0, 9999),
+            ("output", "skip", 1, 999999),
+            ("outputOptions", "jpg.quality", 1, 100),
+            ("outputOptions", "png.compression", 0, 9),
+            ("transferOverrides", "width", 1, 99999),
+            ("transferOverrides", "height", 1, 99999),
+        )
+        for section, key, minimum, maximum in integerRanges:
+            if "." in key:
+                group, childKey = key.split(".", 1)
+                value = validated[section][group][childKey]
+            else:
+                value = validated[section][key]
+            if value < minimum or value > maximum:
+                if strict:
+                    raise ValueError(f"project.{section}.{key} must be between {minimum} and {maximum}.")
+                value = max(minimum, min(maximum, value))
+                if "." in key:
+                    validated[section][group][childKey] = value
+                else:
+                    validated[section][key] = value
+
+        floatRanges = (
+            ("blend", "spread", 0.0, 1.0),
+            ("blend", "scale", 0.0, 9999.0),
+            ("blend", "lift", -1.0, 1.0),
+            ("blend", "intensity", 0.0, 1.0),
+            ("transferOverrides", "middleGray", 0.0, 1.0),
+        )
+        for section, key, minimum, maximum in floatRanges:
+            value = validated[section][key]
+            if value < minimum or value > maximum:
+                if strict:
+                    raise ValueError(f"project.{section}.{key} must be between {minimum} and {maximum}.")
+                validated[section][key] = max(minimum, min(maximum, value))
+
+        rangeStart = validated["input"]["rangeStart"]
+        rangeStop = validated["input"]["rangeStop"]
+        if rangeStop < rangeStart:
+            if strict:
+                raise ValueError("project.input.rangeStop must not be less than rangeStart.")
+            validated["input"]["rangeStop"] = rangeStart
+
+        subsampling = validated["outputOptions"]["jpg"]["subsampling"]
+        if subsampling is not None and (
+            not isinstance(subsampling, int)
+            or isinstance(subsampling, bool)
+            or subsampling not in (0, 1, 2)
+        ):
+            if strict:
+                raise ValueError("project.outputOptions.jpg.subsampling must be null, 0, 1, or 2.")
+            validated["outputOptions"]["jpg"]["subsampling"] = None
+
+        tiffCompression = validated["outputOptions"]["tiff"]["compression"]
+        if tiffCompression not in (None, "tiff_lzw", "tiff_adobe_deflate", "packbits", "jpeg"):
+            if strict:
+                raise ValueError("project.outputOptions.tiff.compression has an unsupported value.")
+            validated["outputOptions"]["tiff"]["compression"] = None
+
+        return validated
+
+    def ValidateUiConfig(self, config):
+        defaults = self._UiConfig()
+        validated = self.ValidateConfigData(config, defaults, configName = "config")
+
+        projectData = {
+            "version": 1,
+            "type": "stackerProject",
+            "input": validated["input"],
+            "blend": validated["blend"],
+            "output": validated["output"],
+            "outputOptions": validated["outputOptions"],
+            "transferOverrides": validated["transferOverrides"],
+        }
+        validatedProject = self.ValidateProjectConfig(projectData, strict = False)
+        for section in ("input", "blend", "output", "outputOptions"):
+            validated[section] = {
+                key: copy.deepcopy(validatedProject[section][key])
+                for key in defaults[section]
+            }
+        viewportScaling = validated["transferOverrides"]["viewportScaling"]
+        validated["transferOverrides"] = {
+            key: copy.deepcopy(validatedProject["transferOverrides"][key])
+            for key in defaults["transferOverrides"]
+            if key in validatedProject["transferOverrides"]
+        }
+        validated["transferOverrides"]["viewportScaling"] = (
+            viewportScaling
+            if viewportScaling in ("Interpolated", "Nearest")
+            else defaults["transferOverrides"]["viewportScaling"]
+        )
+
+        if validated["version"] != 1:
+            validated["version"] = 1
+
+        projectPath = validated["project"]["path"]
+        if projectPath is not None and not isinstance(projectPath, str):
+            validated["project"]["path"] = defaults["project"]["path"]
+
+        viewportBackground = validated["appearance"]["viewportBackground"]
+        if viewportBackground is not None and (
+            not isinstance(viewportBackground, int)
+            or isinstance(viewportBackground, bool)
+        ):
+            validated["appearance"]["viewportBackground"] = defaults["appearance"]["viewportBackground"]
+        elif viewportBackground is not None:
+            validated["appearance"]["viewportBackground"] = max(0, min(255, viewportBackground))
+
+        sidebarWidth = validated["layout"]["sidebarWidth"]
+        validated["layout"]["sidebarWidth"] = max(1, min(100000, sidebarWidth))
+
+        preview = validated["preview"]
+        if preview["scale"] not in (1, 2, 4):
+            preview["scale"] = defaults["preview"]["scale"]
+        preview["fps"] = max(0.25, min(30.0, preview["fps"]))
+        preview["playbackFps"] = max(1, min(120, preview["playbackFps"]))
+        preview["cacheLimitMb"] = max(128, min(65536, preview["cacheLimitMb"]))
+
+        sourcePreview = config.get("preview", {}) if isinstance(config, dict) else {}
+        frameCount = sourcePreview.get("frameCount", defaults["preview"]["frameCount"])
+        if frameCount == "range" or (
+            isinstance(frameCount, int)
+            and not isinstance(frameCount, bool)
+            and frameCount in (50, 100, 250, 500)
+        ):
+            preview["frameCount"] = frameCount
+        else:
+            preview["frameCount"] = defaults["preview"]["frameCount"]
+
+        return validated
+
     def ApplyProjectConfig(self, config, sections = None, focusFirstInput = True):
         allSections = sections is None
         sections = set(("input", "blend", "output", "outputOptions", "transferOverrides") if sections is None else sections)
@@ -1170,8 +1510,7 @@ class ProjectMixin:
         except (OSError, json.JSONDecodeError):
             return
 
-        if not isinstance(config, dict):
-            return
+        config = self.ValidateUiConfig(config)
 
         inputConfig = config.get("input", {})
         projectConfig = config.get("project", {})

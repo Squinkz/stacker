@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import sys
 import threading
 from collections import OrderedDict
 
@@ -29,7 +30,6 @@ from render.renderer import CanonicalFileType, FileTypeExtensions, ResizeFilterN
 
 APP_NAME = "Stacker"
 APP_VERSION = "0.1.0"
-APP_RELEASE_DATE = "Unreleased"
 APP_COPYRIGHT = "2026 Dieter Stassen"
 APP_DESCRIPTION = (
     "Stacker blends image sequences into trails, motion effects, and experimental composites; "
@@ -56,6 +56,9 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         self.thread = None
         self.worker = None
+        self.numbaWarmupProcess = None
+        self.numbaWarmupError = None
+        self.pendingRenderAfterWarmup = None
         self.cancelEvent = None
         self.pauseEvent = None
         self.previewPixmap = None
@@ -148,6 +151,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         self.ResetUndoHistory(clean = not self.projectDirty)
         self.UpdateProjectTitle()
         self.statusBar().hide()
+        QtCore.QTimer.singleShot(0, self.StartNumbaWarmup)
 
     def _BuildShortcuts(self):
         self.previousFrameShortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left), self)
@@ -2418,7 +2422,7 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
         layout.addWidget(iconLabel, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
 
         layout.addSpacing(8)
-        versionLabel = QtWidgets.QLabel(f"Version {APP_VERSION} - {APP_RELEASE_DATE}")
+        versionLabel = QtWidgets.QLabel(f"Version {APP_VERSION}")
         versionLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         versionLabel.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(versionLabel)
@@ -6747,7 +6751,66 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
 
         self.StartRender(previewOnly = True)
 
+    def StartNumbaWarmup(self):
+        # Compiled builds disable Numba's disk cache, so a child process could not share its JIT output.
+        if getattr(sys, "frozen", False) or "__compiled__" in globals():
+            return
+        if (
+            self.numbaWarmupProcess
+            and self.numbaWarmupProcess.state() != QtCore.QProcess.ProcessState.NotRunning
+        ):
+            return
+
+        blendFunction = self.blendMode.currentData()
+        pyFunction = getattr(blendFunction, "py_func", blendFunction)
+        blendFunctionName = getattr(pyFunction, "__name__", "")
+        arguments = ["-m", "main", "--numba-warmup", blendFunctionName]
+
+        self.numbaWarmupProcess = QtCore.QProcess(self)
+        self.numbaWarmupProcess.setWorkingDirectory(AppRoot())
+        self.numbaWarmupProcess.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
+        self.numbaWarmupProcess.errorOccurred.connect(self.NumbaWarmupFailed)
+        self.numbaWarmupProcess.finished.connect(self.NumbaWarmupFinished)
+        self.numbaWarmupProcess.start(sys.executable, arguments)
+
+    @QtCore.Slot(QtCore.QProcess.ProcessError)
+    def NumbaWarmupFailed(self, _processError):
+        if self.numbaWarmupProcess is None:
+            return
+        self.numbaWarmupError = self.numbaWarmupProcess.errorString()
+        if self.numbaWarmupProcess.state() != QtCore.QProcess.ProcessState.NotRunning:
+            return
+
+        self.numbaWarmupProcess.deleteLater()
+        self.numbaWarmupProcess = None
+        if self.pendingRenderAfterWarmup is not None:
+            previewOnly = self.pendingRenderAfterWarmup
+            self.pendingRenderAfterWarmup = None
+            QtCore.QTimer.singleShot(0, lambda: self.StartRender(previewOnly))
+
+    @QtCore.Slot(int, QtCore.QProcess.ExitStatus)
+    def NumbaWarmupFinished(self, exitCode, _exitStatus):
+        if self.numbaWarmupProcess is None:
+            return
+        if exitCode != 0:
+            output = bytes(self.numbaWarmupProcess.readAll()).decode("utf-8", errors = "replace").strip()
+            self.numbaWarmupError = output or f"Numba warmup exited with code {exitCode}."
+
+        self.numbaWarmupProcess.deleteLater()
+        self.numbaWarmupProcess = None
+        if self.pendingRenderAfterWarmup is not None:
+            previewOnly = self.pendingRenderAfterWarmup
+            self.pendingRenderAfterWarmup = None
+            QtCore.QTimer.singleShot(0, lambda: self.StartRender(previewOnly))
+
     def StartRender(self, previewOnly = False):
+        if (
+            self.numbaWarmupProcess
+            and self.numbaWarmupProcess.state() != QtCore.QProcess.ProcessState.NotRunning
+        ):
+            self.pendingRenderAfterWarmup = previewOnly
+            return
+
         if not previewOnly and not self.outputDirectory.Text():
             if not self.OpenOutputFolderBrowser():
                 return
@@ -7293,6 +7356,16 @@ class MainWindow(PresetMixin, ProjectMixin, QtWidgets.QMainWindow):
             self.ShowRenderQuitDialog()
             event.ignore()
             return
+
+        self.pendingRenderAfterWarmup = None
+        if (
+            self.numbaWarmupProcess
+            and self.numbaWarmupProcess.state() != QtCore.QProcess.ProcessState.NotRunning
+        ):
+            warmupProcess = self.numbaWarmupProcess
+            if not warmupProcess.waitForFinished(30000):
+                warmupProcess.kill()
+                warmupProcess.waitForFinished()
 
         self.SaveUiConfig()
         super().closeEvent(event)

@@ -86,3 +86,40 @@ class RenderWorker(QtCore.QObject):
             QtGui.QImage.Format.Format_RGB888,
         ).copy()
         self.preview.emit(image, displayFrame)
+
+
+class NumbaWarmupWorker(QtCore.QObject):
+
+    finished = QtCore.Signal()
+    error = QtCore.Signal(str)
+
+    def __init__(self, blendFunction):
+        super().__init__()
+        self.blendFunction = blendFunction
+
+    @QtCore.Slot()
+    def Run(self):
+        try:
+            rgbUint8 = np.full((16, 16, 3), 128, dtype = np.uint8)
+            rgbUint8.setflags(write = False)
+            rgbFloat = np.full((16, 16, 3), 0.5, dtype = np.float32)
+            bnc.SrgbToLinear(rgbUint8)
+            bnc.Uint8ToNormalizedFloat(rgbUint8)
+            bnc.LinearToTransferUint8(rgbFloat, bnc.TRANSFER_SRGB)
+            bnc.BlendAndComposite(
+                rgbFloat,
+                rgbFloat,
+                bnc.BLEND_MODE_MAX,
+                0.9,
+                1.0,
+                0.0,
+                False,
+                1.0,
+                0.5,
+            )
+            if self.blendFunction is not None:
+                self.blendFunction(rgbFloat, rgbFloat)
+        except Exception:
+            self.error.emit(traceback.format_exc())
+        finally:
+            self.finished.emit()

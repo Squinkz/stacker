@@ -170,7 +170,7 @@ Dependencies are listed in `requirements.txt`.
 
 ## Status
 
-Stacker is currently unreleased and still in active development.
+Stacker is currently in active development.
 
 ## License
 
